@@ -1963,7 +1963,7 @@ function SLTab({sales,setSales}) {
   );
 }
 
-function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes}) {
+function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout}) {
   const [tab,setTab]=useState('dash');
   const [open,setOpen]=useState(true);
   const tabs=[
@@ -1978,6 +1978,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           <span style={{fontSize:15}}>⚙️</span><div style={{color:G.gold,fontWeight:'bold',fontSize:14}}>Admin Panel — Taste of Desh</div>
         </div>
         <button onClick={goCustomer} style={{padding:'5px 13px',borderRadius:16,border:'none',cursor:'pointer',background:'rgba(255,255,255,0.15)',color:G.w,fontWeight:'bold',fontSize:11}}>🏠 View Storefront</button>
+        <button onClick={onLogout} style={{padding:'5px 13px',borderRadius:16,border:'none',cursor:'pointer',background:'rgba(255,255,255,0.15)',color:G.w,fontWeight:'bold',fontSize:11}}>🚪 Logout</button>
       </div>
       <div style={{display:'flex',minHeight:'calc(100vh - 86px)',background:G.bg}}>
         <div style={{width:open?206:58,flexShrink:0,background:G.gd,transition:'width 0.2s ease',display:'flex',flexDirection:'column',position:'sticky',top:0,alignSelf:'flex-start',height:'calc(100vh - 86px)',overflowY:'auto'}}>
@@ -1998,6 +1999,48 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales}/>}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminLogin({onLogin}){
+  const [email,setEmail]=useState('');
+  const [password,setPassword]=useState('');
+  const [error,setError]=useState('');
+  const [busy,setBusy]=useState(false);
+
+  async function doLogin(){
+    if(!email||!password){setError('Enter email and password');return;}
+    setBusy(true);setError('');
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if(error){setBusy(false);setError(error.message);return;}
+    const profile = await fetchProfile(data.user.id);
+    if(profile?.role!=='admin'){
+      await supabase.auth.signOut();
+      setBusy(false);
+      setError('This account does not have admin access.');
+      return;
+    }
+    setBusy(false);
+    onLogin({
+      id:data.user.id,
+      name:profile?.full_name||data.user.email?.split('@')[0]||'Admin',
+      mobile:profile?.mobile||'',
+      email:profile?.email||data.user.email||'',
+      role:'admin',
+    });
+  }
+
+  return (
+    <div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',background:'#0d522c'}}>
+      <div style={{background:'#fff',borderRadius:16,padding:32,width:320,maxWidth:'90%',boxSizing:'border-box'}}>
+        <div style={{fontWeight:900,fontSize:22,color:'#0d522c',marginBottom:4,textAlign:'center'}}>Admin Login</div>
+        <div style={{fontSize:12,color:'#77bba2',textAlign:'center',marginBottom:20}}>Taste of Desh</div>
+        <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email" style={{width:'100%',padding:'12px 16px',borderRadius:30,border:'1px solid #ddd',marginBottom:10,boxSizing:'border-box'}}/>
+        <input value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password" type="password" onKeyDown={e=>e.key==='Enter'&&doLogin()} style={{width:'100%',padding:'12px 16px',borderRadius:30,border:'1px solid #ddd',marginBottom:10,boxSizing:'border-box'}}/>
+        {error && <div style={{color:'#c0392b',fontSize:12,marginBottom:10,textAlign:'center'}}>{error}</div>}
+        <button onClick={doLogin} disabled={busy} style={{width:'100%',padding:'13px',borderRadius:30,border:'none',background:'#3c7962',color:'#fff',fontWeight:'bold',cursor:busy?'default':'pointer'}}>{busy?'...':'Login'}</button>
       </div>
     </div>
   );
@@ -2033,11 +2076,6 @@ export default function App() {
     return ()=>window.removeEventListener('popstate',onPop);
   },[]);
   useEffect(()=>{
-    function onPop(){setView(pathIsAdmin()?'admin':'customer');}
-    window.addEventListener('popstate',onPop);
-    return ()=>window.removeEventListener('popstate',onPop);
-  },[]);
-  useEffect(()=>{
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
         const profile = await fetchProfile(session.user.id);
@@ -2063,7 +2101,10 @@ export default function App() {
     <div style={{fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',minHeight:'100vh'}}>
       {view==='customer'
         ?<CustomerApp prods={prods} cats={cats} cart={cart} addToCart={addToCart} rm={rm} upd={upd} orders={orders} setOrders={setOrders} setCart={setCart} lang={lang} setLang={setLang} auth={auth} setAuth={setAuth} customSlides={customSlides} qrCodes={qrCodes}/>
-        :<AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes}/>
+        :(auth.loggedIn && auth.user?.role==='admin'
+            ?<AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes} onLogout={async()=>{await supabase.auth.signOut();setAuth({loggedIn:false,user:null});}}/>
+            :<AdminLogin onLogin={(u)=>setAuth({loggedIn:true,user:u})}/>
+          )
       }
     </div>
   );
