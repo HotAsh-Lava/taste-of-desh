@@ -572,6 +572,7 @@ function AuthScreen({onLogin,t}) {
   // user object up to App.jsx via onLogin().
   async function completeLogin(userId, fallbackEmail){
     const profile = await fetchProfile(userId);
+    console.log('MY ROLE IS:', profile?.role);
     onLogin({
       id: userId,
       name: profile?.full_name || fallbackEmail?.split('@')[0] || 'Customer',
