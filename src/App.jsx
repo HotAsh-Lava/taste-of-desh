@@ -571,7 +571,6 @@ function AuthScreen({onLogin,t}) {
   // Completes login: fetches the profiles row and hands the merged
   // user object up to App.jsx via onLogin().
   async function completeLogin(userId, fallbackEmail){
-    const profile = await fetchProfile(userId);
     console.log('MY ROLE IS:', profile?.role);
     onLogin({
       id: userId,
