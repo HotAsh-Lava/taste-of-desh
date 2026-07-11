@@ -726,7 +726,21 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   const [sec,setSec]=useState('main');
   const [na,setNa] = useState({name:'',mob:'',addr:''});
   const stC = {pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd},completed:{bg:G.gl,c:G.gd}};
-  function addAddr(){if(!na.name||!na.mob||!na.addr)return;setAddrs(p=>[...p,{id:nid(p),...na}]);setNa({name:'',mob:'',addr:''});setSec('addrs');}
+  function addAddr(){
+  if(!na.name||!na.mob||!na.addr)return;
+  if(na.id){
+    setAddrs(p=>p.map(a=>a.id===na.id?{...na}:a));
+  } else {
+    setAddrs(p=>[...p,{id:nid(p),...na}]);
+  }
+  setNa({name:'',mob:'',addr:''});
+  setSec('addrs');
+}
+function editAddr(a){ setNa(a); setSec('addAddr'); }
+function deleteAddr(id){
+  if(!window.confirm('Delete this address?'))return;
+  setAddrs(p=>p.filter(a=>a.id!==id));
+}
   async function doLogout(){
   await supabase.auth.signOut();
   setAuth({loggedIn:false,user:null});
@@ -793,25 +807,39 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
             <div style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}} onClick={()=>setSec('main')}><span style={{fontSize:20}}>‹</span><span style={{fontWeight:'bold',fontSize:15}}>{t('savedAddresses')}</span></div>
             <Btn sm onClick={()=>setSec('addAddr')}>+ Add</Btn>
           </div>
-          {addrs.map(a=>(
-            <Card key={a.id} style={{marginBottom:10}}>
-              <div style={{fontWeight:'bold',fontSize:13,marginBottom:4}}>{a.name}</div>
-              <div style={{fontSize:12,color:G.tx,marginBottom:2}}>📱 {a.mob}</div>
-              <div style={{fontSize:12,color:G.tx}}>📍 {a.addr}</div>
-            </Card>
-          ))}
+          {addrs.length===0
+            ? <div style={{textAlign:'center',color:G.mut,padding:40}}>No saved addresses yet</div>
+            : addrs.map(a=>(
+              <Card key={a.id} style={{marginBottom:10}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+                  <div style={{flex:1}}>
+                    <div style={{fontWeight:'bold',fontSize:13,marginBottom:4}}>{a.name}</div>
+                    <div style={{fontSize:12,color:G.tx,marginBottom:2}}>📱 {a.mob}</div>
+                    <div style={{fontSize:12,color:G.tx}}>📍 {a.addr}</div>
+                  </div>
+                  <div style={{display:'flex',gap:10,marginLeft:10}}>
+                    <span onClick={()=>editAddr(a)} style={{cursor:'pointer',fontSize:16}} title="Edit">✏️</span>
+                    <span onClick={()=>deleteAddr(a.id)} style={{cursor:'pointer',fontSize:16}} title="Delete">🗑️</span>
+                  </div>
+                </div>
+              </Card>
+            ))
+          }
         </div>
       )}
       {sec==='addAddr'&&(
         <div>
-          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,cursor:'pointer'}} onClick={()=>setSec('addrs')}><span style={{fontSize:20}}>‹</span><span style={{fontWeight:'bold',fontSize:15}}>{t('addAddress')}</span></div>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,cursor:'pointer'}} onClick={()=>{setNa({name:'',mob:'',addr:''});setSec('addrs');}}>
+            <span style={{fontSize:20}}>‹</span>
+            <span style={{fontWeight:'bold',fontSize:15}}>{na.id?'Edit Address':t('addAddress')}</span>
+          </div>
           <FInput label={t('name')} value={na.name} onChange={v=>setNa(p=>({...p,name:v}))} req/>
           <FInput label={t('mobileNumber')} value={na.mob} onChange={v=>setNa(p=>({...p,mob:v}))} req/>
           <div style={{marginBottom:10}}>
             <div style={{fontSize:11,color:G.tx,marginBottom:3,fontWeight:'600'}}>{t('address')}<span style={{color:G.rd}}> *</span></div>
             <textarea value={na.addr} onChange={e=>setNa(p=>({...p,addr:e.target.value}))} style={{width:'100%',padding:'8px 11px',borderRadius:8,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box',minHeight:70,resize:'vertical'}}/>
           </div>
-          <Btn onClick={addAddr} style={{width:'100%',justifyContent:'center'}}>{t('saveAddress')}</Btn>
+          <Btn onClick={addAddr} style={{width:'100%',justifyContent:'center'}}>{na.id?'Save Changes':t('saveAddress')}</Btn>
         </div>
       )}
       {sec==='lang'&&(
@@ -957,7 +985,7 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
   const [tab,setTab] = useState('home');
   const [coStep,setCO] = useState(null);
   const [info,setInfo] = useState({name:'',mob:'',addr:''});
-  const [addrs,setAddrs] = useState([{id:1,name:'Home',mob:'13051203480',addr:'Beijing, Fangshan District'}]);
+  const [addrs,setAddrs] = useState([]);
   const t = useT(lang);
   const cartN=cart.reduce((s,i)=>s+i.qty,0);
   const rawTotal=cart.reduce((s,i)=>s+i.sp*i.qty,0);
