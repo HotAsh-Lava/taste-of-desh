@@ -547,6 +547,83 @@ async function fetchProfile(userId) {
   return data;
 }
 
+// ==================== Stage 4: Supabase <-> UI field mapping helpers ====================
+// Products
+function fromDbProduct(row) {
+  return {
+    id: row.id, name: row.name, upc: row.upc || '', cat: row.category,
+    unit: row.unit || 'PCS', pw: row.pack_weight, gw: row.gross_weight,
+    sp: row.selling_price, cp: row.cost_price || 0, stock: row.stock || 0,
+    disc: row.discount || 0, offer: !!row.on_offer, bs: !!row.best_seller,
+    isNew: !!row.is_new, img: row.image_url || '',
+  };
+}
+function toDbProduct(p) {
+  return {
+    name: p.name, upc: p.upc || null, category: p.cat, unit: p.unit || 'PCS',
+    pack_weight: p.pw, gross_weight: p.gw, selling_price: p.sp, cost_price: p.cp || 0,
+    stock: p.stock || 0, discount: p.disc || 0, on_offer: !!p.offer,
+    best_seller: !!p.bs, is_new: !!p.isNew, image_url: p.img || null,
+  };
+}
+// Inventory
+function fromDbInv(row) {
+  return {
+    id: row.id, date: row.date, ts: row.time || '', name: row.name,
+    cat: row.category || '', qty: row.qty, exp: row.expiry_date,
+    sp: row.selling_price || 0, cp: row.cost_price || 0, pw: row.pack_weight || 0,
+    upc: row.upc || '',
+  };
+}
+function toDbInv(item, productId) {
+  return {
+    product_id: productId || null, date: item.date, time: item.ts, name: item.name,
+    category: item.cat, qty: item.qty, expiry_date: item.exp,
+    selling_price: item.sp, cost_price: item.cp, pack_weight: item.pw, upc: item.upc,
+  };
+}
+// Sales (+ sale_items)
+function fromDbSale(row, items) {
+  return {
+    id: row.id, seq: row.seq, date: row.date, type: row.type, oid: row.order_id,
+    cname: row.customer_name, mob: row.mobile, addr: row.address,
+    items: items.map(it => ({ name: it.name, qty: it.qty, up: it.unit_price, tp: it.total_price })),
+    sub: row.subtotal, disc: row.discount, discTotal: row.discount_total,
+    courier: row.courier_fee, grand: row.grand_total,
+  };
+}
+function toDbSale(sale) {
+  return {
+    seq: sale.seq, date: sale.date, type: sale.type, order_id: sale.oid,
+    customer_name: sale.cname, mobile: sale.mob, address: sale.addr,
+    subtotal: sale.sub, discount: sale.disc, discount_total: sale.discTotal,
+    courier_fee: sale.courier, grand_total: sale.grand,
+  };
+}
+// Online orders (+ order_items) — admin reads/updates only, customer checkout writes these (Stage 5)
+function fromDbOrder(row, items) {
+  return {
+    id: row.id, date: row.date, time: row.time, cname: row.customer_name,
+    mob: row.mobile, addr: row.address, status: row.status, tracking: row.tracking || [],
+    custCourier: row.customer_courier_fee, discTotal: row.discount_total,
+    items: items.map(it => ({ name: it.name, qty: it.qty, up: it.unit_price, gw: it.gross_weight })),
+  };
+}
+// Purchase orders — header + line items stored as jsonb (mirrors the existing `tracking jsonb` pattern)
+function fromDbPO(row) {
+  return {
+    id: row.id, poNum: row.po_num, date: row.date, time: row.time, vendor: row.vendor || '',
+    hdr: row.hdr || { cr: '', sr: '', bdc: '', cnc: '' }, items: row.items || [],
+    totQty: row.tot_qty, totC: row.tot_c, totS: row.tot_s, bdLC: row.bd_lc, chnLC: row.chn_lc, grand: row.grand,
+  };
+}
+function toDbPO(po) {
+  return {
+    po_num: po.poNum, date: po.date, time: po.time, vendor: po.vendor, hdr: po.hdr, items: po.items,
+    tot_qty: po.totQty, tot_c: po.totC, tot_s: po.totS, bd_lc: po.bdLC, chn_lc: po.chnLC, grand: po.grand,
+  };
+}
+
 function AuthScreen({onLogin,t}) {
   const [mode,setMode]=useState('login'); // 'login' | 'register' | 'reset'
   const [form,setForm]=useState({email:'',password:'',name:'',confirm:'',newPassword:'',newConfirm:'',otp:''});
@@ -1053,22 +1130,40 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
   function handleSlideImg(e){
     const f=e.target.files[0]; if(!f) return;
     const rd=new FileReader();
-    rd.onload=()=>{
-      setCustomSlides(p=>[...p,{id:nid(p),img:rd.result,caption:capt}]);
+    rd.onload=async ()=>{
+      const next=[...customSlides,{id:nid(customSlides),img:rd.result,caption:capt}];
+      const { error } = await supabase.from('site_settings').update({custom_slides:next}).eq('id',true);
+      if(error){alert('Failed to save slide: '+error.message);return;}
+      setCustomSlides(next);
       setCapt('');
     };
     rd.readAsDataURL(f);
     e.target.value='';
   }
-  function delSlide(id){ setCustomSlides(p=>p.filter(s=>s.id!==id)); }
+  async function delSlide(id){
+    const next=customSlides.filter(s=>s.id!==id);
+    const { error } = await supabase.from('site_settings').update({custom_slides:next}).eq('id',true);
+    if(error){alert('Failed to delete slide: '+error.message);return;}
+    setCustomSlides(next);
+  }
   function handleQRImg(method,e){
     const f=e.target.files[0]; if(!f) return;
     const rd=new FileReader();
-    rd.onload=()=>{ setQrCodes(p=>({...p,[method]:rd.result})); };
+    rd.onload=async ()=>{
+      const next={...qrCodes,[method]:rd.result};
+      const { error } = await supabase.from('site_settings').update({qr_codes:next}).eq('id',true);
+      if(error){alert('Failed to save QR code: '+error.message);return;}
+      setQrCodes(next);
+    };
     rd.readAsDataURL(f);
     e.target.value='';
   }
-  function delQR(method){ setQrCodes(p=>({...p,[method]:''})); }
+  async function delQR(method){
+    const next={...qrCodes,[method]:''};
+    const { error } = await supabase.from('site_settings').update({qr_codes:next}).eq('id',true);
+    if(error){alert('Failed to remove QR: '+error.message);return;}
+    setQrCodes(next);
+  }
   const monthly=[
     {m:'Jan',sales:850,cost:520,profit:210,courier:120},{m:'Feb',sales:1200,cost:740,profit:280,courier:180},
     {m:'Mar',sales:980,cost:600,profit:240,courier:140},{m:'Apr',sales:1450,cost:880,profit:360,courier:210},
@@ -1203,15 +1298,30 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
     rd.onload=()=>setNp(p=>({...p,img:rd.result}));
     rd.readAsDataURL(f);
   }
-  function addProd(){
+  async function addProd(){
     if(!np.name||!np.cat||!np.sp||!np.pw||!np.gw){alert('Name, Category, Packed Weight, Gross Weight and Selling Price are required');return;}
     if(!np.img){alert('Please upload a product picture');return;}
-    setProds(p=>[...p,{...np,id:nid(p),pw:+np.pw,gw:+np.gw,sp:+np.sp,cp:+np.cp||0,stock:+np.stock||0,disc:+np.disc||0,offer:+np.disc>0,bs:false,isNew:true}]);
+    const draft={...np,pw:+np.pw,gw:+np.gw,sp:+np.sp,cp:+np.cp||0,stock:+np.stock||0,disc:+np.disc||0,offer:+np.disc>0,bs:false,isNew:true};
+    const { data, error } = await supabase.from('products').insert(toDbProduct(draft)).select().single();
+    if(error){alert('Failed to save product: '+error.message);return;}
+    setProds(p=>[...p, fromDbProduct(data)]);
     setNp({name:'',upc:'',cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:0,disc:0,img:''});setShowAdd(false);
   }
-  function doDelete(){setProds(p=>p.filter(x=>!sel.includes(x.id)));setSel([]);setConf(null);}
-  function applyDisc(){setProds(p=>p.map(x=>sel.includes(x.id)?{...x,disc:discPct,offer:discPct>0}:x));setSel([]);setDiscMode(false);}
-  function removeDisc(){setProds(p=>p.map(x=>sel.includes(x.id)?{...x,disc:0,offer:false}:x));setSel([]);setDiscMode(false);}
+  async function doDelete(){
+    const { error } = await supabase.from('products').delete().in('id', sel);
+    if(error){alert('Failed to delete: '+error.message);return;}
+    setProds(p=>p.filter(x=>!sel.includes(x.id)));setSel([]);setConf(null);
+  }
+  async function applyDisc(){
+    const { error } = await supabase.from('products').update({ discount: discPct, on_offer: discPct>0 }).in('id', sel);
+    if(error){alert('Failed to apply discount: '+error.message);return;}
+    setProds(p=>p.map(x=>sel.includes(x.id)?{...x,disc:discPct,offer:discPct>0}:x));setSel([]);setDiscMode(false);
+  }
+  async function removeDisc(){
+    const { error } = await supabase.from('products').update({ discount: 0, on_offer: false }).in('id', sel);
+    if(error){alert('Failed to remove discount: '+error.message);return;}
+    setProds(p=>p.map(x=>sel.includes(x.id)?{...x,disc:0,offer:false}:x));setSel([]);setDiscMode(false);
+  }
   function tog(id){setSel(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);}
   const allSel = list.length>0 && list.every(p=>sel.includes(p.id));
   function toggleAll(){ setSel(allSel ? [] : list.map(p=>p.id)); }
@@ -1306,18 +1416,39 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
   },[inv,q,cats]);
   const matching=useMemo(()=>{if(!srch)return[];return prods.filter(p=>p.name.toLowerCase().includes(srch.toLowerCase())||(p.upc||'').includes(srch)).slice(0,8);},[srch,prods]);
   function selProd(p){setNi({name:p.name,cat:p.cat,qty:'',exp:'',sp:p.sp,cp:p.cp||'',pw:p.pw,upc:p.upc||''});setSrch(p.name);}
-  function addItem(){
+  async function addItem(){
     if(!ni.name||!ni.qty||!ni.exp){alert('Product, quantity and expiry date required');return;}
-    const item={id:nid(inv),date:bjDate(),ts:bjTime(),...ni,qty:+ni.qty,sp:+ni.sp,cp:+ni.cp,pw:+ni.pw};
+    const draft={date:bjDate(),ts:bjTime(),...ni,qty:+ni.qty,sp:+ni.sp,cp:+ni.cp,pw:+ni.pw};
+    const matchedProd=prods.find(x=>x.name===draft.name);
+    const { data, error } = await supabase.from('inventory').insert(toDbInv(draft, matchedProd?.id)).select().single();
+    if(error){alert('Failed to save inventory item: '+error.message);return;}
+    const item=fromDbInv(data);
     setInv(p=>[...p,item]);
-    setProds(p=>p.map(x=>{if(x.name!==ni.name)return x;const tot=[...inv,item].filter(i=>i.name===x.name).reduce((s,i)=>s+i.qty,0);return{...x,stock:tot};}));
+    if(matchedProd){
+      const newStock=[...inv,item].filter(i=>i.name===draft.name).reduce((s,i)=>s+i.qty,0);
+      const { error: upErr } = await supabase.from('products').update({stock:newStock}).eq('id',matchedProd.id);
+      if(!upErr) setProds(p=>p.map(x=>x.id===matchedProd.id?{...x,stock:newStock}:x));
+    }
     setNi({name:'',cat:'',qty:'',exp:'',sp:'',cp:'',pw:'',upc:''});setSrch('');setShowAdd(false);
   }
-  function doRemove(){
+  async function doRemove(){
     const toRm=inv.filter(i=>sel.includes(i.id));
-    setDelInv(p=>[...toRm.map(x=>({...x,deletedAt:`${bjDate()} ${bjTime()}`})),...p]);
+    const archived=toRm.map(x=>({...x,deletedAt:`${bjDate()} ${bjTime()}`}));
+    const { error: archErr } = await supabase.from('inventory_archive').insert(archived.map(a=>({original_data:a})));
+    if(archErr){alert('Failed to archive removed items: '+archErr.message);return;}
+    const { error: delErr } = await supabase.from('inventory').delete().in('id', sel);
+    if(delErr){alert('Failed to remove: '+delErr.message);return;}
+    setDelInv(p=>[...archived,...p]);
     setInv(p=>p.filter(i=>!sel.includes(i.id)));
-    setProds(p=>p.map(x=>{const rmQty=toRm.filter(i=>i.name===x.name).reduce((s,i)=>s+i.qty,0);return rmQty>0?{...x,stock:Math.max(0,x.stock-rmQty)}:x;}));
+    const byName={};
+    toRm.forEach(i=>{byName[i.name]=(byName[i.name]||0)+i.qty;});
+    for(const name of Object.keys(byName)){
+      const prod=prods.find(x=>x.name===name);
+      if(!prod) continue;
+      const newStock=Math.max(0,prod.stock-byName[name]);
+      await supabase.from('products').update({stock:newStock}).eq('id',prod.id);
+      setProds(p=>p.map(x=>x.id===prod.id?{...x,stock:newStock}:x));
+    }
     setSel([]);setConf(null);
   }
   function tog(id){setSel(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);}
@@ -1450,20 +1581,30 @@ function PITab({prods,pos,setPOs,catColors}) {
   const chnLC=(+hdr.cnc)*(+hdr.sr)||0;
   const grand=totC+totS+(+hdr.bdc||0)+chnLC;
 
-  function save(){
+  async function save(){
     const fi=items.filter(i=>i.name&&i.qty);if(!fi.length){alert('Add at least one product');return;}
     const existing = curId ? pos.find(p=>p.id===curId) : null;
-    const o={id:curId||nid(pos),poNum,date:existing?existing.date:bjDate(),time:existing?existing.time:bjTime(),vendor,hdr:{...hdr},items:fi,totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand};
-    if(curId)setPOs(p=>p.map(x=>x.id===curId?o:x));else {setPOs(p=>[...p,o]); setCurId(o.id);}
+    const draft={poNum,date:existing?existing.date:bjDate(),time:existing?existing.time:bjTime(),vendor,hdr:{...hdr},items:fi,totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand};
+    if(curId){
+      const { error } = await supabase.from('purchase_orders').update(toDbPO(draft)).eq('id',curId);
+      if(error){alert('Failed to save purchase order: '+error.message);return;}
+      setPOs(p=>p.map(x=>x.id===curId?{...draft,id:curId}:x));
+    } else {
+      const { data, error } = await supabase.from('purchase_orders').insert(toDbPO(draft)).select().single();
+      if(error){alert('Failed to save purchase order: '+error.message);return;}
+      const saved=fromDbPO(data);
+      setPOs(p=>[...p,saved]); setCurId(saved.id);
+    }
     alert('Purchase order saved!');
   }
   function newOrd(){setHdr({cr:'',sr:'',bdc:'',cnc:''});setVendor('');setItems([blankPIItem()]);setCurId(null);}
-  function deleteOrder(){
+  async function deleteOrder(){
     if(!curId){alert('Load or save an order first, or click Load on one below to delete it.');return;}
-    setPOs(prev=>{
-      const remaining=prev.filter(p=>p.id!==curId).sort((a,b)=>a.poNum-b.poNum).map((p,i)=>({...p,poNum:i+1}));
-      return remaining;
-    });
+    const { error } = await supabase.from('purchase_orders').delete().eq('id',curId);
+    if(error){alert('Failed to delete: '+error.message);return;}
+    const remaining=pos.filter(p=>p.id!==curId).sort((a,b)=>a.poNum-b.poNum).map((p,i)=>({...p,poNum:i+1}));
+    await Promise.all(remaining.map(p=>supabase.from('purchase_orders').update({po_num:p.poNum}).eq('id',p.id)));
+    setPOs(remaining);
     newOrd();
   }
   function printOrder(){
@@ -1551,16 +1692,22 @@ function PITab({prods,pos,setPOs,catColors}) {
 
 function PLTab({pos,setPOs,inv,setInv,catColors}) {
   const [sel,setSel]=useState([]);
-  function moveToInv(){
+  async function moveToInv(){
     const toMv=[];
     pos.forEach(po=>po.items.forEach((it,ii)=>{
       const key=`${po.id}_${ii}`;
       if(sel.includes(key) && !it.moved) toMv.push({...it,_poId:po.id,_idx:ii});
     }));
     if(!toMv.length){setSel([]);return;}
-    const news=toMv.map((it,ii)=>({id:nid([...inv,{id:inv.length+ii+1}]),date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||''}));
+    const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||''}));
+    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d,null))).select();
+    if(error){alert('Failed to move to inventory: '+error.message);return;}
+    const news=data.map(fromDbInv);
     setInv(p=>[...p,...news]);
-    setPOs(prev=>prev.map(po=>({...po,items:po.items.map((it,ii)=>sel.includes(`${po.id}_${ii}`)?{...it,moved:true}:it)})));
+    const updatedPOs=pos.map(po=>({...po,items:po.items.map((it,ii)=>sel.includes(`${po.id}_${ii}`)?{...it,moved:true}:it)}));
+    const affectedPOs=updatedPOs.filter(po=>po.items.some((it,ii)=>sel.includes(`${po.id}_${ii}`)));
+    await Promise.all(affectedPOs.map(po=>supabase.from('purchase_orders').update({items:po.items}).eq('id',po.id)));
+    setPOs(updatedPOs);
     alert(`${news.length} items moved to Inventory!`);setSel([]);
   }
   return(
@@ -1628,13 +1775,28 @@ function OOTab({orders,setOrders,sales,setSales}) {
   const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
   const stC={pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd}};
   function upd(id,f,v){setOrders(p=>p.map(o=>o.id===id?{...o,[f]:v}:o));}
-  function complete(o){
+  async function syncOrder(o){
+    const { error } = await supabase.from('orders').update({
+      customer_name:o.cname, mobile:o.mob, address:o.addr, status:o.status,
+      tracking:o.tracking, customer_courier_fee:o.custCourier, discount_total:o.discTotal,
+    }).eq('id',o.id);
+    if(error) console.error('syncOrder error:', error.message);
+  }
+  async function complete(o){
     const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
     const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
     const cour=o.custCourier!=null?o.custCourier:cf(tgw);
     const disc=o.discTotal||sub;const grand=disc+cour;
     const seq=nextSeq(sales);
-    const sl={id:nid(sales),seq,date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,items:o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)})),sub,disc:sub-disc,discTotal:disc,courier:cour,grand};
+    const draft={seq,date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,sub,disc:sub-disc,discTotal:disc,courier:cour,grand};
+    const lineItems=o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}));
+    const { data, error } = await supabase.from('sales').insert(toDbSale(draft)).select().single();
+    if(error){alert('Failed to complete order: '+error.message);return;}
+    const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:data.id,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
+    if(itErr){alert('Failed to save sale items: '+itErr.message);return;}
+    const { error: ordErr } = await supabase.from('orders').update({status:'completed'}).eq('id',o.id);
+    if(ordErr) console.error('Failed to sync completed status:', ordErr.message);
+    const sl={...draft,id:data.id,items:lineItems};
     setSales(p=>[sl,...p]);setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed'}:x));setConf(null);
   }
   return(
@@ -1655,15 +1817,15 @@ function OOTab({orders,setOrders,sales,setSales}) {
               <span style={{background:sc.bg,color:sc.c,borderRadius:10,padding:'3px 10px',fontSize:11,fontWeight:'bold'}}>{o.status}</span>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:10}}>
-              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>CUSTOMER</div><input value={o.cname} onChange={e=>upd(o.id,'cname',e.target.value)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
-              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>MOBILE</div><input value={o.mob} onChange={e=>upd(o.id,'mob',e.target.value)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
+              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>CUSTOMER</div><input value={o.cname} onChange={e=>upd(o.id,'cname',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
+              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>MOBILE</div><input value={o.mob} onChange={e=>upd(o.id,'mob',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
               <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>STATUS</div>
-                <select value={o.status} onChange={e=>upd(o.id,'status',e.target.value)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}>
+                <select value={o.status} onChange={e=>{upd(o.id,'status',e.target.value); syncOrder({...o,status:e.target.value});}} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}>
                   <option value="pending">Pending</option><option value="processing">Processing</option><option value="shipped">Shipped</option>
                 </select>
               </div>
             </div>
-            <div style={{marginBottom:10}}><div style={{fontSize:10,color:G.mut,marginBottom:3}}>ADDRESS</div><textarea value={o.addr} onChange={e=>upd(o.id,'addr',e.target.value)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:11,boxSizing:'border-box',minHeight:44,resize:'vertical'}}/></div>
+            <div style={{marginBottom:10}}><div style={{fontSize:10,color:G.mut,marginBottom:3}}>ADDRESS</div><textarea value={o.addr} onChange={e=>upd(o.id,'addr',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:11,boxSizing:'border-box',minHeight:44,resize:'vertical'}}/></div>
             <div style={{background:G.bg,borderRadius:8,padding:10,marginBottom:10}}>
               {o.items.map((it,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:3}}><span>{it.name} ×{it.qty}</span><span>¥{(it.up*it.qty).toFixed(2)}</span></div>)}
               <div style={{borderTop:`1px solid ${G.brd}`,marginTop:7,paddingTop:7}}>
@@ -1672,7 +1834,7 @@ function OOTab({orders,setOrders,sales,setSales}) {
                 <div style={{display:'flex',justifyContent:'space-between',fontSize:12,alignItems:'center'}}>
                   <span>Courier</span>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
-                    <input type="number" value={o.custCourier??''} onChange={e=>upd(o.id,'custCourier',e.target.value===''?null:+e.target.value)} placeholder={String(cf(tgw))} style={{width:58,padding:'2px 5px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/>
+                    <input type="number" value={o.custCourier??''} onChange={e=>upd(o.id,'custCourier',e.target.value===''?null:+e.target.value)} onBlur={()=>syncOrder(o)} placeholder={String(cf(tgw))} style={{width:58,padding:'2px 5px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/>
                     <span>¥{cour.toFixed(2)}</span>
                   </div>
                 </div>
@@ -1681,21 +1843,21 @@ function OOTab({orders,setOrders,sales,setSales}) {
             </div>
             <div style={{marginBottom:10,display:'flex',alignItems:'center',gap:8,fontSize:12}}>
               <span style={{color:G.tx,whiteSpace:'nowrap'}}>Custom discount price (¥):</span>
-              <input type="number" value={o.discTotal??''} onChange={e=>upd(o.id,'discTotal',e.target.value?+e.target.value:null)} placeholder="Optional" style={{width:90,padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
+              <input type="number" value={o.discTotal??''} onChange={e=>upd(o.id,'discTotal',e.target.value?+e.target.value:null)} onBlur={()=>syncOrder(o)} placeholder="Optional" style={{width:90,padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
             </div>
             <div style={{marginBottom:12}}>
               <div style={{fontWeight:'bold',fontSize:12,marginBottom:6}}>📦 Tracking Numbers</div>
               {o.tracking.map((tk,i)=>(
                 <div key={i} style={{display:'flex',gap:6,marginBottom:5}}>
-                  <input value={tk} onChange={e=>{const tr=[...o.tracking];tr[i]=e.target.value;upd(o.id,'tracking',tr);}} style={{flex:1,padding:'5px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
-                  <button onClick={()=>upd(o.id,'tracking',o.tracking.filter((_,j)=>j!==i))} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>
+                  <input value={tk} onChange={e=>{const tr=[...o.tracking];tr[i]=e.target.value;upd(o.id,'tracking',tr);}} onBlur={()=>syncOrder(o)} style={{flex:1,padding:'5px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
+                  <button onClick={()=>{const nt=o.tracking.filter((_,j)=>j!==i);upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>
                 </div>
               ))}
-              <Btn sm v='info' onClick={()=>upd(o.id,'tracking',[...o.tracking,''])}>+ Add Tracking #</Btn>
+              <Btn sm v='info' onClick={()=>{const nt=[...o.tracking,''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
             </div>
             <div style={{display:'flex',gap:8}}>
               <Btn onClick={()=>setConf({msg:`Complete order ${o.id} and move to Sales List?`,yes:()=>complete(o)})}>✅ Complete Order</Btn>
-              <Btn v='danger' sm onClick={()=>setConf({msg:'Cancel this order?',yes:()=>{upd(o.id,'status','cancelled');setConf(null);}})}>Cancel</Btn>
+              <Btn v='danger' sm onClick={()=>setConf({msg:'Cancel this order?',yes:()=>{upd(o.id,'status','cancelled');syncOrder({...o,status:'cancelled'});setConf(null);}})}>Cancel</Btn>
             </div>
           </Card>
         );
@@ -1755,17 +1917,34 @@ function SITab({prods,inv,sales,setSales,catColors}) {
   function resetForm(){
     setCust({name:'',addr:'',mob:''});setItems([blankSIItem()]);setCtype('Not Free');setCcour('');setDtype('No');setDpct(0);setCdsc('');setCurId(null);setOnum(nextSeq(sales));
   }
-  function save(){
+  async function save(){
     const fi=items.filter(i=>i.name&&i.qty);
     if(!fi.length){alert('Add at least one item');return;}
     const existing = curId ? sales.find(s=>s.id===curId) : null;
     const seq = existing ? existing.seq : onum;
-    const sl={id:curId||nid(sales),seq,date:existing?existing.date:bjDate(),type:'invoice',oid:`INV${seq}`,cname:cust.name,mob:cust.mob,addr:cust.addr,items:fi.map(i=>({name:i.name,qty:+i.qty,up:+i.up,tp:+i.tp})),sub,disc:damt,discTotal:pad,courier:cour,grand};
-    if(curId){ setSales(p=>p.map(x=>x.id===curId?sl:x)); } else { setSales(p=>[sl,...p]); setCurId(sl.id); }
+    const draft={seq,date:existing?existing.date:bjDate(),type:'invoice',oid:`INV${seq}`,cname:cust.name,mob:cust.mob,addr:cust.addr,sub,disc:damt,discTotal:pad,courier:cour,grand};
+    const lineItems=fi.map(i=>({name:i.name,qty:+i.qty,up:+i.up,tp:+i.tp}));
+    if(curId){
+      const { error } = await supabase.from('sales').update(toDbSale(draft)).eq('id',curId);
+      if(error){alert('Failed to save: '+error.message);return;}
+      await supabase.from('sale_items').delete().eq('sale_id',curId);
+      const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:curId,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
+      if(itErr){alert('Failed to save items: '+itErr.message);return;}
+      setSales(p=>p.map(x=>x.id===curId?{...draft,id:curId,items:lineItems}:x));
+    } else {
+      const { data, error } = await supabase.from('sales').insert(toDbSale(draft)).select().single();
+      if(error){alert('Failed to save: '+error.message);return;}
+      const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:data.id,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
+      if(itErr){alert('Failed to save items: '+itErr.message);return;}
+      const saved={...draft,id:data.id,items:lineItems};
+      setSales(p=>[saved,...p]); setCurId(saved.id);
+    }
     alert('Sales order saved!');
   }
-  function deleteCurrent(){
+  async function deleteCurrent(){
     if(!curId){alert('Load or save an order first, or select one below to delete.');return;}
+    const { error } = await supabase.from('sales').delete().eq('id',curId);
+    if(error){alert('Failed to delete: '+error.message);return;}
     setSales(p=>p.filter(x=>x.id!==curId));
     resetForm();
   }
@@ -1785,7 +1964,9 @@ function SITab({prods,inv,sales,setSales,catColors}) {
     setCtype('Customized Courier'); setCcour(String(s.courier||0));
     setDtype(s.disc>0?'Customized Discount':'No'); setCdsc(String(s.disc||0));
   }
-  function deleteFromList(id){
+  async function deleteFromList(id){
+    const { error } = await supabase.from('sales').delete().eq('id',id);
+    if(error){alert('Failed to delete: '+error.message);return;}
     setSales(p=>p.filter(x=>x.id!==id));
     if(curId===id) resetForm();
     setRsel(p=>p.filter(x=>x!==id));
@@ -1903,9 +2084,11 @@ function SLTab({sales,setSales}) {
   function toggle(id){setExp(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n;});}
   const allSel = list.length>0 && list.every(s=>sel.includes(s.id));
   function toggleAll(){ setSel(allSel ? [] : list.map(s=>s.id)); }
-  function deleteSelected(){
+  async function deleteSelected(){
     if(!sel.length) return;
     if(!window.confirm(`Delete ${sel.length} sales record(s)? This cannot be undone.`)) return;
+    const { error } = await supabase.from('sales').delete().in('id', sel);
+    if(error){alert('Failed to delete: '+error.message);return;}
     setSales(p=>p.filter(s=>!sel.includes(s.id)));
     setSel([]);
   }
@@ -2054,13 +2237,13 @@ export default function App() {
   const [view,setView]=useState(()=>pathIsAdmin()?'admin':'customer');
   const [lang,setLang]=useState('en');
   const [auth,setAuth]=useState({loggedIn:false,user:null});
-  const [prods,setProds]=useState(IP);
+  const [prods,setProds]=useState([]);
   const [cats,setCats]=useState(['Essentials','Basic Spices','Spice Blends','Desserts','Snacks']);
   const [catColors,setCatColors]=useState(DEFAULT_CAT_COLORS);
-  const [inv,setInv]=useState(IINV);
+  const [inv,setInv]=useState([]);
   const [delInv,setDelInv]=useState([]);
-  const [orders,setOrders]=useState(IORDERS);
-  const [sales,setSales]=useState(ISALES);
+  const [orders,setOrders]=useState([]);
+  const [sales,setSales]=useState([]);
   const [pos,setPOs]=useState([]);
   const [cart,setCart]=useState([]);
   const [customSlides,setCustomSlides]=useState([]);
@@ -2075,6 +2258,52 @@ export default function App() {
     window.addEventListener('popstate',onPop);
     return ()=>window.removeEventListener('popstate',onPop);
   },[]);
+  // Loads data every visitor needs: products, online orders (+items), and site-wide settings
+  // (homepage slideshow images + payment QR codes). Runs once on mount for both customer and admin views.
+  useEffect(()=>{
+    async function loadPublicData(){
+      const [prodRes, orderRes, orderItemRes, settingsRes] = await Promise.all([
+        supabase.from('products').select('*').order('id'),
+        supabase.from('orders').select('*').order('created_at',{ascending:false}),
+        supabase.from('order_items').select('*'),
+        supabase.from('site_settings').select('*').eq('id',true).single(),
+      ]);
+      if(prodRes.error) console.error('loadProducts error:', prodRes.error.message);
+      else setProds(prodRes.data.map(fromDbProduct));
+      if(orderRes.data && orderItemRes.data){
+        setOrders(orderRes.data.map(o=>fromDbOrder(o, orderItemRes.data.filter(it=>it.order_id===o.id))));
+      } else if(orderRes.error) console.error('loadOrders error:', orderRes.error.message);
+      if(settingsRes.data){
+        setCustomSlides(settingsRes.data.custom_slides || []);
+        setQrCodes(settingsRes.data.qr_codes || {alipay:'',wechat:''});
+      } else if(settingsRes.error) console.error('loadSettings error:', settingsRes.error.message);
+    }
+    loadPublicData();
+  },[]);
+  // Loads admin-only data: inventory, deleted-inventory archive, sales (+items), and purchase orders.
+  // Gated to the admin view so ordinary customers never trigger these queries.
+  useEffect(()=>{
+    if(view!=='admin' || !auth.loggedIn || auth.user?.role!=='admin') return;
+    async function loadAdminData(){
+      const [invRes, archRes, salesRes, saleItemRes, posRes] = await Promise.all([
+        supabase.from('inventory').select('*').order('id'),
+        supabase.from('inventory_archive').select('*').order('archived_at',{ascending:false}),
+        supabase.from('sales').select('*').order('id',{ascending:false}),
+        supabase.from('sale_items').select('*'),
+        supabase.from('purchase_orders').select('*').order('po_num'),
+      ]);
+      if(invRes.data) setInv(invRes.data.map(fromDbInv));
+      else if(invRes.error) console.error('loadInventory error:', invRes.error.message);
+      if(archRes.data) setDelInv(archRes.data.map(r=>r.original_data));
+      else if(archRes.error) console.error('loadArchive error:', archRes.error.message);
+      if(salesRes.data && saleItemRes.data){
+        setSales(salesRes.data.map(s=>fromDbSale(s, saleItemRes.data.filter(it=>it.sale_id===s.id))));
+      } else if(salesRes.error) console.error('loadSales error:', salesRes.error.message);
+      if(posRes.data) setPOs(posRes.data.map(fromDbPO));
+      else if(posRes.error) console.error('loadPurchaseOrders error:', posRes.error.message);
+    }
+    loadAdminData();
+  },[view, auth.loggedIn, auth.user?.role]);
   useEffect(()=>{
     supabase.auth.getSession().then(async ({ data: { session } }) => {
       if (session?.user) {
