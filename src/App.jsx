@@ -1835,7 +1835,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
             <div style={{fontWeight:'bold',fontSize:14,color:'#B71C1C'}}>🗑 Deleted Items (Archive) · {delInv.length}</div>
             <div style={{display:'flex',gap:8,alignItems:'center'}}>
               {archSel.length>0&&<span style={{fontSize:11,color:G.mut}}>{archSel.length} selected</span>}
-              <Btn sm disabled={archSel.length===0||archBusy} onClick={restoreArchived}>↩️ Restore to Inventory</Btn>
+              <Btn sm v='success' disabled={archSel.length===0||archBusy} onClick={restoreArchived}>↩️ Restore to Inventory</Btn>
               <Btn sm v='danger' disabled={archSel.length===0||archBusy} onClick={purgeArchived}>🔥 Delete Forever</Btn>
             </div>
           </div>
@@ -1933,6 +1933,392 @@ function PITab({prods,pos,setPOs,catColors}) {
   const chnLC=(+hdr.cnc)*(+hdr.sr)||0;
   const grand=totC+totS+(+hdr.bdc||0)+chnLC;
 
+  async function save(){
+    const fi=items.filter(i=>i.name&&i.qty);if(!fi.length){alert('Add at least one product');return;}
+    const existing = curId ? pos.find(p=>p.id===curId) : null;
+    const draft={poNum,date:existing?existing.date:bjDate(),time:existing?existing.time:bjTime(),vendor,hdr:{...hdr},items:fi,totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand};
+    if(curId){
+      const { error } = await supabase.from('purchase_orders').update(toDbPO(draft)).eq('id',curId);
+      if(error){alert('Failed to save purchase order: '+error.message);return;}
+      setPOs(p=>p.map(x=>x.id===curId?{...draft,id:curId}:x));
+    } else {
+      const { data, error } = await supabase.from('purchase_orders').insert(toDbPO(draft)).select().single();
+      if(error){alert('Failed to save purchase order: '+error.message);return;}
+      const saved=fromDbPO(data);
+      setPOs(p=>[...p,saved]); setCurId(saved.id);
+    }
+    alert('Purchase order saved!');
+  }
+  function newOrd(){setHdr({cr:'',sr:'',bdc:'',cnc:''});setVendor('');setItems([blankPIItem()]);setCurId(null);}
+  async function deleteOrder(){
+    if(!curId){alert('Load or save an order first, or click Load on one below to delete it.');return;}
+    const { error } = await supabase.from('purchase_orders').delete().eq('id',curId);
+    if(error){alert('Failed to delete: '+error.message);return;}
+    const remaining=pos.filter(p=>p.id!==curId).sort((a,b)=>a.poNum-b.poNum).map((p,i)=>({...p,poNum:i+1}));
+    await Promise.all(remaining.map(p=>supabase.from('purchase_orders').update({po_num:p.poNum}).eq('id',p.id)));
+    setPOs(remaining);
+    newOrd();
+  }
+  function printOrder(){
+    const html=buildPOHTML({poNum,date:bjDate(),time:bjTime(),vendor,hdr,items:items.filter(i=>i.name&&i.qty),totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand});
+    openPrintWindow(html);
+  }
+  function loadPO(po){
+    setCurId(po.id); setVendor(po.vendor||''); setHdr(po.hdr||{cr:'',sr:'',bdc:'',cnc:''});
+    setItems([...(po.items||[]).map(it=>({...it})), blankPIItem()]);
+  }
+
+  return(
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <div style={{fontSize:19,fontWeight:'bold',color:G.dk}}>🧾 Purchase Invoice</div>
+        <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+          <Btn onClick={newOrd}>+ New</Btn>
+          <Btn v='info' onClick={save}>💾 Save</Btn>
+          <Btn v='outline' onClick={printOrder}>🖨️ Print PDF</Btn>
+          <Btn v='danger' onClick={deleteOrder}>🗑️ Delete</Btn>
+        </div>
+      </div>
+      <Card style={{marginBottom:14}}>
+        <div style={{fontSize:12,color:G.mut,marginBottom:10,fontWeight:'bold'}}>PO# {poNum} · Date: {bjDate()} · Time: {bjTime()}</div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(175px,1fr))',gap:10}}>
+          <FInput label="Vendor" value={vendor} onChange={setVendor}/>
+          <FInput label="Costing RMB Rate" value={hdr.cr} onChange={v=>setHdr(p=>({...p,cr:v}))} type="number"/>
+          <FInput label="Selling RMB Rate" value={hdr.sr} onChange={v=>setHdr(p=>({...p,sr:v}))} type="number"/>
+          <FInput label="BD Courier (BDT)" value={hdr.bdc} onChange={v=>setHdr(p=>({...p,bdc:v}))} type="number"/>
+          <FInput label="China Courier (RMB)" value={hdr.cnc} onChange={v=>setHdr(p=>({...p,cnc:v}))} type="number"/>
+        </div>
+      </Card>
+      <Card style={{marginBottom:14,overflowX:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:1050}}>
+          <thead><tr style={{background:G.gd,color:G.w}}>
+            {['Product Name','Qty','Packed(g)','Unit Cost(BDT)','Total Cost(BDT)','Category','Gross(KG)','Unit Ship(BDT)','Total Ship(BDT)','Expiry','Per Pkt(RMB)','Set Price(RMB)','UPC','✕'].map(h=>(
+              <th key={h} style={{padding:'7px 5px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
+            ))}
+          </tr></thead>
+          <tbody>{items.map((it,idx)=>(
+            <tr key={idx} style={{background:idx%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
+              <td style={{padding:'5px',minWidth:155}}><ComboInput value={it.name} onChange={v=>updItem(idx,'name',v)} onPick={p=>selectItem(idx,p)} options={prods} placeholder="Type to search product..."/></td>
+              <td style={{padding:'5px'}}><input type="number" value={it.qty} onChange={e=>updItem(idx,'qty',e.target.value)} style={{width:50,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11,textAlign:'center'}}/></td>
+              <td style={{padding:'5px',textAlign:'center'}}>{it.pw||'—'}</td>
+              <td style={{padding:'5px'}}><input type="number" value={it.uc} onChange={e=>updItem(idx,'uc',e.target.value)} style={{width:65,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
+              <td style={{padding:'5px',textAlign:'center',fontWeight:'bold'}}>{it.tc||0}</td>
+              <td style={{padding:'5px',textAlign:'center'}}>{it.cat?<CatChip cat={it.cat} catColors={catColors}/>:<span style={{fontSize:10,color:G.mut}}>—</span>}</td>
+              <td style={{padding:'5px',textAlign:'center'}}>{it.gw}</td>
+              <td style={{padding:'5px'}}><input type="number" value={it.us} onChange={e=>updItem(idx,'us',e.target.value)} style={{width:65,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
+              <td style={{padding:'5px',textAlign:'center',fontWeight:'bold'}}>{it.ts2||0}</td>
+              <td style={{padding:'5px'}}><input type="date" value={it.exp} onChange={e=>updItem(idx,'exp',e.target.value)} style={{padding:'3px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:10}}/></td>
+              <td style={{padding:'5px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{it.ppc?`¥${it.ppc}`:'—'}</td>
+              <td style={{padding:'5px'}}><input type="number" value={it.sp} onChange={e=>updItem(idx,'sp',e.target.value)} style={{width:60,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
+              <td style={{padding:'5px',textAlign:'center',fontSize:10}}>{it.upc}</td>
+              <td style={{padding:'5px',textAlign:'center'}}>{items.length>1&&<button onClick={()=>setItems(p=>p.filter((_,j)=>j!==idx))} style={{background:'none',border:'none',cursor:'pointer',color:'#B71C1C',fontSize:14}}>✕</button>}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+        <div style={{marginTop:10}}><Btn sm onClick={()=>setItems(p=>[...p,blankPIItem()])}>+ Add Row</Btn></div>
+        <div style={{background:G.bg,borderRadius:8,padding:12,marginTop:14,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,fontSize:12}}>
+          <div><strong>Total Qty:</strong> {totQty} PCS</div><div><strong>Total Cost:</strong> ৳{totC.toFixed(2)}</div>
+          <div><strong>Total Shipping:</strong> ৳{totS.toFixed(2)}</div><div><strong>BD Courier:</strong> ৳{(+hdr.bdc||0).toFixed(2)}</div>
+          <div><strong>China Courier:</strong> ৳{chnLC.toFixed(2)}</div>
+          <div style={{fontWeight:'bold',color:G.gd,fontSize:14}}><strong>Grand Total:</strong> ৳{grand.toFixed(2)}</div>
+        </div>
+      </Card>
+      {pos.length>0&&(
+        <Card>
+          <div style={{fontWeight:'bold',fontSize:13,marginBottom:10}}>Recent Purchase Orders</div>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead><tr style={{background:G.gl}}><th style={{padding:'7px',textAlign:'left'}}>PO#</th><th style={{padding:'7px'}}>Date</th><th style={{padding:'7px'}}>Vendor</th><th style={{padding:'7px',textAlign:'center'}}>Grand Total</th><th style={{padding:'7px',textAlign:'center'}}>Action</th></tr></thead>
+            <tbody>{[...pos].sort((a,b)=>b.poNum-a.poNum).map(po=>(
+              <tr key={po.id} style={{borderBottom:`1px solid ${G.brd}`,background:curId===po.id?G.gl:'transparent'}}>
+                <td style={{padding:'7px',fontWeight:'bold'}}>{po.poNum}</td><td style={{padding:'7px'}}>{po.date}</td><td style={{padding:'7px'}}>{po.vendor||'—'}</td>
+                <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>৳{po.grand?.toFixed(2)}</td>
+                <td style={{padding:'7px',textAlign:'center'}}><Btn sm onClick={()=>loadPO(po)}>Load</Btn></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function PLTab({pos,setPOs,inv,setInv,catColors}) {
+  const [sel,setSel]=useState([]);
+  async function moveToInv(){
+    const toMv=[];
+    pos.forEach(po=>po.items.forEach((it,ii)=>{
+      const key=`${po.id}_${ii}`;
+      if(sel.includes(key) && !it.moved) toMv.push({...it,_poId:po.id,_idx:ii});
+    }));
+    if(!toMv.length){setSel([]);return;}
+    const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||''}));
+    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d,null))).select();
+    if(error){alert('Failed to move to inventory: '+error.message);return;}
+    const news=data.map(fromDbInv);
+    setInv(p=>[...p,...news]);
+    const updatedPOs=pos.map(po=>({...po,items:po.items.map((it,ii)=>sel.includes(`${po.id}_${ii}`)?{...it,moved:true}:it)}));
+    const affectedPOs=updatedPOs.filter(po=>po.items.some((it,ii)=>sel.includes(`${po.id}_${ii}`)));
+    await Promise.all(affectedPOs.map(po=>supabase.from('purchase_orders').update({items:po.items}).eq('id',po.id)));
+    setPOs(updatedPOs);
+    alert(`${news.length} items moved to Inventory!`);setSel([]);
+  }
+  return(
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <div style={{fontSize:19,fontWeight:'bold',color:G.dk}}>📜 Purchase List</div>
+        {sel.length>0&&<Btn onClick={moveToInv}>📦 Move to Inventory ({sel.length})</Btn>}
+      </div>
+      {pos.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No purchase orders yet. Create one in Purchase Invoice.</div></Card>:
+        [...pos].sort((a,b)=>b.poNum-a.poNum).map(po=>{
+          const selectableKeys = po.items.map((it,i)=>!it.moved?`${po.id}_${i}`:null).filter(Boolean);
+          const allSelHere = selectableKeys.length>0 && selectableKeys.every(k=>sel.includes(k));
+          function toggleAllHere(){
+            if(allSelHere) setSel(p=>p.filter(x=>!selectableKeys.includes(x)));
+            else setSel(p=>[...new Set([...p,...selectableKeys])]);
+          }
+          return(
+          <Card key={po.id} style={{marginBottom:18}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(135px,1fr))',gap:10,background:G.gl,borderRadius:9,padding:'11px 15px',marginBottom:12}}>
+              {[['PO#',po.poNum],['Vendor',po.vendor||'—'],['Grand Total(BDT)',`৳${(po.grand||0).toFixed(2)}`],['Total Cost(BDT)',`৳${(po.totC||0).toFixed(2)}`],['Total Ship(BDT)',`৳${(po.totS||0).toFixed(2)}`],['BD Local Courier(BDT)',`৳${(po.bdLC||0).toFixed(2)}`],['China Local Courier(BDT)',`৳${(po.chnLC||0).toFixed(2)}`],['Costing RMB Rate',po.hdr?.cr||'—'],['Selling RMB Rate',po.hdr?.sr||'—'],['BD Courier(BDT)',po.hdr?.bdc||'—'],['China Courier(RMB)',po.hdr?.cnc||'—']].map(([l,v])=>(
+                <div key={l}><div style={{fontSize:10,color:G.mut,fontWeight:'bold'}}>{l}</div><div style={{fontSize:12,fontWeight:'bold',color:G.dk}}>{v}</div></div>
+              ))}
+            </div>
+            <div style={{fontSize:11,color:G.mut,marginBottom:8}}>{po.date} · {po.time}</div>
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:760}}>
+                <thead><tr style={{background:G.gd,color:G.w}}>
+                  <th style={{padding:'7px 5px',textAlign:'center'}}>{selectableKeys.length>0?<input type="checkbox" checked={allSelHere} onChange={toggleAllHere}/>:'✓'}</th>
+                  {['SI.','Product Name','Category','Packed(g)','Qty','Gross(KG)','Unit Ship','Total Ship','Expiry','Per Pkt(RMB)','Set Price','UPC'].map(h=>(
+                    <th key={h} style={{padding:'7px 5px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>{po.items.map((it,i)=>{const key=`${po.id}_${i}`;return(
+                  <tr key={key} style={{background:it.moved?'#F1F8F2':i%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.moved
+                      ?<span title="Already moved to Inventory" style={{color:G.gm,fontSize:15}}>✅</span>
+                      :<input type="checkbox" checked={sel.includes(key)} onChange={()=>setSel(p=>p.includes(key)?p.filter(x=>x!==key):[...p,key])}/>
+                    }</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{i+1}</td>
+                    <td style={{padding:'6px',fontWeight:'bold'}}>{it.name}{it.moved&&<span style={{marginLeft:6,background:G.gl,color:G.gd,borderRadius:4,padding:'1px 6px',fontSize:9,fontWeight:'bold',whiteSpace:'nowrap'}}>✓ IN INVENTORY</span>}</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.cat?<CatChip cat={it.cat} catColors={catColors}/>:'—'}</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.pw}</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.qty}</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.gw}</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.us}</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.ts2}</td>
+                    <td style={{padding:'6px',textAlign:'center',...expStyle(it.exp)}}>{it.exp}</td>
+                    <td style={{padding:'6px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{it.ppc?`¥${it.ppc}`:'—'}</td>
+                    <td style={{padding:'6px',textAlign:'center'}}>{it.sp?`¥${it.sp}`:'—'}</td>
+                    <td style={{padding:'6px',fontSize:10,color:G.mut}}>{it.upc}</td>
+                  </tr>
+                );})}</tbody>
+              </table>
+            </div>
+          </Card>
+          );
+        })
+      }
+    </div>
+  );
+}
+
+function OOTab({orders,setOrders,sales,setSales,reloadProducts}) {
+  const [conf,setConf]=useState(null);
+  const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
+  const stC={pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd}};
+  function upd(id,f,v){setOrders(p=>p.map(o=>o.id===id?{...o,[f]:v}:o));}
+  async function syncOrder(o){
+    const { error } = await supabase.from('orders').update({
+      customer_name:o.cname, mobile:o.mob, address:o.addr, status:o.status,
+      tracking:o.tracking, customer_courier_fee:o.custCourier, discount_total:o.discTotal,
+    }).eq('id',o.id);
+    if(error) console.error('syncOrder error:', error.message);
+  }
+  // Cancelling puts the reserved stock back on the shelf.
+  // (The inventory batch it came out of is not recreated — if you need the expiry
+  // date tracked again, re-add the batch in the Inventory tab.)
+  async function cancelOrder(o){
+    const { error: rpcErr } = await supabase.rpc('restore_order_stock', { p_order_id: o.id });
+    if(rpcErr){ alert('Failed to return the stock: '+rpcErr.message); return; }
+    const { error } = await supabase.from('orders').update({status:'cancelled'}).eq('id',o.id);
+    if(error){ alert('Failed to cancel the order: '+error.message); return; }
+    upd(o.id,'status','cancelled');
+    if(reloadProducts) await reloadProducts();
+    setConf(null);
+  }
+  async function complete(o){
+    const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+    const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
+    const cour=o.custCourier!=null?o.custCourier:cf(tgw);
+    const disc=o.discTotal||sub;const grand=disc+cour;
+    const seq=nextSeq(sales);
+    const draft={seq,date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,sub,disc:sub-disc,discTotal:disc,courier:cour,grand};
+    const lineItems=o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}));
+    const { data, error } = await supabase.from('sales').insert(toDbSale(draft)).select().single();
+    if(error){alert('Failed to complete order: '+error.message);return;}
+    const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:data.id,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
+    if(itErr){alert('Failed to save sale items: '+itErr.message);return;}
+    const { error: ordErr } = await supabase.from('orders').update({status:'completed'}).eq('id',o.id);
+    if(ordErr) console.error('Failed to sync completed status:', ordErr.message);
+    const sl={...draft,id:data.id,items:lineItems};
+    setSales(p=>[sl,...p]);setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed'}:x));setConf(null);
+  }
+  return(
+    <div>
+      {conf&&<ConfirmDlg msg={conf.msg} onYes={conf.yes} onNo={()=>setConf(null)}/>}
+      <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:4}}>🛒 Online Orders</div>
+      <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Active: {active.length} · Total: {orders.length}</div>
+      {active.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No active orders</div></Card>:active.map(o=>{
+        const sc=stC[o.status]||stC.pending;
+        const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+        const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
+        const cour=o.custCourier!=null?o.custCourier:cf(tgw);
+        const disc=o.discTotal||sub;const grand=disc+cour;
+        return(
+          <Card key={o.id} style={{marginBottom:16}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12}}>
+              <div><div style={{fontWeight:'bold',fontSize:15,color:G.gd}}>{o.id}</div><div style={{fontSize:11,color:G.mut}}>{o.date} {o.time}</div></div>
+              <span style={{background:sc.bg,color:sc.c,borderRadius:10,padding:'3px 10px',fontSize:11,fontWeight:'bold'}}>{o.status}</span>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:10}}>
+              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>CUSTOMER</div><input value={o.cname} onChange={e=>upd(o.id,'cname',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
+              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>MOBILE</div><input value={o.mob} onChange={e=>upd(o.id,'mob',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
+              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>STATUS</div>
+                <select value={o.status} onChange={e=>{upd(o.id,'status',e.target.value); syncOrder({...o,status:e.target.value});}} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}>
+                  <option value="pending">Pending</option><option value="processing">Processing</option><option value="shipped">Shipped</option>
+                </select>
+              </div>
+            </div>
+            <div style={{marginBottom:10}}><div style={{fontSize:10,color:G.mut,marginBottom:3}}>ADDRESS</div><textarea value={o.addr} onChange={e=>upd(o.id,'addr',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:11,boxSizing:'border-box',minHeight:44,resize:'vertical'}}/></div>
+            {/* Fix 4: the customer's uploaded payment screenshot */}
+            <div style={{marginBottom:10,padding:10,borderRadius:8,background:o.proofUrl?G.gl:'#FFEBEE',border:`1px solid ${o.proofUrl?G.g:G.rl}`}}>
+              <div style={{fontSize:10,color:G.mut,marginBottom:6,fontWeight:'bold'}}>
+                PAYMENT PROOF {o.payMethod&&<span style={{color:G.tx}}>· {o.payMethod==='alipay'?'💙 Alipay':'💚 WeChat Pay'}</span>}
+              </div>
+              {o.proofUrl
+                ? <a href={o.proofUrl} target="_blank" rel="noopener noreferrer" title="Click to open full size">
+                    <img src={o.proofUrl} alt={`Payment proof for ${o.id}`} style={{maxWidth:200,maxHeight:200,objectFit:'contain',borderRadius:6,border:`1px solid ${G.brd}`,background:G.w,display:'block',cursor:'zoom-in'}}/>
+                  </a>
+                : <div style={{fontSize:12,color:G.rd,fontWeight:'bold'}}>⚠️ No payment proof uploaded for this order.</div>
+              }
+            </div>
+            <div style={{background:G.bg,borderRadius:8,padding:10,marginBottom:10}}>
+              {o.items.map((it,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:3}}><span>{it.name} ×{it.qty}</span><span>¥{(it.up*it.qty).toFixed(2)}</span></div>)}
+              <div style={{borderTop:`1px solid ${G.brd}`,marginTop:7,paddingTop:7}}>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:12}}><span>Subtotal</span><span>¥{sub.toFixed(2)}</span></div>
+                {disc!==sub&&<div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:G.gd}}><span>After Discount</span><span>¥{disc.toFixed(2)}</span></div>}
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:12,alignItems:'center'}}>
+                  <span>Courier</span>
+                  <div style={{display:'flex',alignItems:'center',gap:5}}>
+                    <input type="number" value={o.custCourier??''} onChange={e=>upd(o.id,'custCourier',e.target.value===''?null:+e.target.value)} onBlur={()=>syncOrder(o)} placeholder={String(cf(tgw))} style={{width:58,padding:'2px 5px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/>
+                    <span>¥{cour.toFixed(2)}</span>
+                  </div>
+                </div>
+                <div style={{display:'flex',justifyContent:'space-between',fontWeight:'bold',fontSize:14,marginTop:5,color:G.gd}}><span>Grand Total</span><span>¥{grand.toFixed(2)}</span></div>
+              </div>
+            </div>
+            <div style={{marginBottom:10,display:'flex',alignItems:'center',gap:8,fontSize:12}}>
+              <span style={{color:G.tx,whiteSpace:'nowrap'}}>Custom discount price (¥):</span>
+              <input type="number" value={o.discTotal??''} onChange={e=>upd(o.id,'discTotal',e.target.value?+e.target.value:null)} onBlur={()=>syncOrder(o)} placeholder="Optional" style={{width:90,padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
+            </div>
+            <div style={{marginBottom:12}}>
+              <div style={{fontWeight:'bold',fontSize:12,marginBottom:6}}>📦 Tracking Numbers</div>
+              {o.tracking.map((tk,i)=>(
+                <div key={i} style={{display:'flex',gap:6,marginBottom:5}}>
+                  <input value={tk} onChange={e=>{const tr=[...o.tracking];tr[i]=e.target.value;upd(o.id,'tracking',tr);}} onBlur={()=>syncOrder(o)} style={{flex:1,padding:'5px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
+                  <button onClick={()=>{const nt=o.tracking.filter((_,j)=>j!==i);upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>
+                </div>
+              ))}
+              <Btn sm v='info' onClick={()=>{const nt=[...o.tracking,''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
+            </div>
+            <div style={{display:'flex',gap:8}}>
+              <Btn onClick={()=>setConf({msg:`Complete order ${o.id} and move to Sales List?`,yes:()=>complete(o)})}>✅ Complete Order</Btn>
+              <Btn v='danger' sm onClick={()=>setConf({msg:`Cancel order ${o.id}? The items will be returned to stock.`,yes:()=>cancelOrder(o)})}>Cancel</Btn>
+            </div>
+          </Card>
+        );
+      })}
+    </div>
+  );
+}
+
+function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
+  function blankSIItem(){return {pid:null,name:'',pw:'',qty:'',unit:'PCS',up:'',tp:'',gw:'',exps:[],exp:''};}
+  const [cust,setCust]=useState({name:'',addr:'',mob:''});
+  const [items,setItems]=useState([blankSIItem()]);
+  const [ctype,setCtype]=useState('Not Free');
+  const [ccour,setCcour]=useState('');
+  const [dtype,setDtype]=useState('No');
+  const [dpct,setDpct]=useState(0);
+  const [cdsc,setCdsc]=useState('');
+  const [selIt,setSelIt]=useState([]);
+  const [sdpct,setSdpct]=useState(10);
+  const [curId,setCurId]=useState(null);
+  const [onum,setOnum]=useState(()=>nextSeq(sales));
+  const [rq,setRq]=useState('');
+  const [rsel,setRsel]=useState([]);
+  const [saving,setSaving]=useState(false);
+
+  // ---- Walk-in sales now move real stock. ----
+  // When EDITING an invoice that already took its stock, the units it reserved are
+  // still "available" to that same invoice — otherwise re-saving an unchanged invoice
+  // would look like it needed twice the stock.
+  const savedQty = useMemo(()=>{
+    const m={};
+    const ex = curId ? sales.find(x=>x.id===curId) : null;
+    if(ex && ex.type==='invoice') (ex.items||[]).forEach(i=>{ if(i.pid) m[i.pid]=(m[i.pid]||0)+(+i.qty||0); });
+    return m;
+  },[curId,sales]);
+  function availFor(pid){
+    const pr=prods.find(x=>x.id===pid);
+    if(!pr) return 0;
+    return (pr.stock||0) + (savedQty[pid]||0);
+  }
+  function prodFor(it){ return prods.find(x=>x.id===it.pid) || prods.find(x=>x.name===it.name) || null; }
+  const overLines = items.filter(i=>{
+    if(!i.name || !i.qty) return false;
+    const pr = prodFor(i);
+    return pr ? (+i.qty||0) > availFor(pr.id) : false;
+  });
+
+  const sub=items.reduce((s,i)=>s+(+i.tp||0),0);
+  const tgw=items.reduce((s,i)=>s+(+i.gw||0)*(+i.qty||0),0);
+  const cour=ctype==='Free'?0:ctype==='Not Free'?cf(tgw):(+ccour||0);
+  const damt=dtype==='Yes'?sub*(+dpct/100):dtype==='Customized Discount'?(+cdsc||0):0;
+  const pad=sub-damt; const grand=pad+cour;
+  const hasDsc = dtype!=='No';
+
+  function recalcRow(u){ u.tp=(+(u.qty||0)*(+(u.up||0))).toFixed(2); return u; }
+  function updIt(idx,f,v){
+    setItems(prev=>prev.map((it,i)=>{
+      if(i!==idx) return it;
+      let u={...it,[f]:v};
+      if(f==='name'){
+        u.pid=null;   // re-linked below when picked from the list, or matched by name on save
+        if(v===''){u.pw='';u.up='';u.gw='';u.exps=[];u.exp='';}
+      }
+      return recalcRow(u);
+    }));
+  }
+  function selectProduct(idx,p){
+    setItems(prev=>{
+      const exps = inv.filter(x=>x.name===p.name && x.qty>0).map(x=>({exp:x.exp,qty:x.qty}));
+      const next = prev.map((it,i)=> i!==idx ? it : recalcRow({...it,pid:p.id,name:p.name,pw:p.pw,up:ep(p),unit:p.unit,gw:p.gw,exps,exp:''}));
+      return idx===prev.length-1 ? [...next, blankSIItem()] : next;
+    });
+  }
+  function applySD(){
+    setItems(prev=>prev.map((it,i)=>{
+      if(!selIt.includes(i)) return it;
+      const p=prods.find(x=>x.name===it.name); const bp=p?p.sp:+it.up;
+      const np=+(bp*(1-sdpct/100)).toFixed(2);
+      return recalcRow({...it,up:np});
+    }));
+    setSelIt([]);
+  }
+  function resetForm(){
+    setCust({name:'',addr:'',mob:''});setItems([blankSIItem()]);setCtype('Not Free');setCcour('');setDtype('No');setDpct(0);setCdsc('');setCurId(null);setOnum(nextSeq(sales));
+  }
   async function save(){
     if(saving) return;
     const fi=items.filter(i=>i.name&&i.qty);
@@ -2439,8 +2825,7 @@ export default function App() {
       ]);
       if(invRes.data) setInv(invRes.data.map(fromDbInv));
       else if(invRes.error) console.error('loadInventory error:', invRes.error.message);
-      // keep the archive row's own id so Restore / Delete-Forever know which rows to touch
-      if(archRes.data) setDelInv(archRes.data.map(r=>({...r.original_data, archiveId:r.id})));
+      if(archRes.data) setDelInv(archRes.data.map(r=>r.original_data));
       else if(archRes.error) console.error('loadArchive error:', archRes.error.message);
       if(salesRes.data && saleItemRes.data){
         setSales(salesRes.data.map(s=>fromDbSale(s, saleItemRes.data.filter(it=>it.sale_id===s.id))));
