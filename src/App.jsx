@@ -1688,6 +1688,270 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
   );
 }
 
+// ==================== Editing ====================
+
+// In BULK mode a field does nothing until you tick it. That's the whole point:
+// "edit 12 products" must never quietly overwrite a field you didn't mean to touch.
+// Untouched = untouched.
+function BulkField({on,setOn,k,label,children}) {
+  const active = !!on[k];
+  return (
+    <div style={{marginBottom:10,opacity:active?1:0.45,transition:'opacity 0.15s'}}>
+      <label style={{display:'flex',alignItems:'center',gap:6,fontSize:11,fontWeight:'600',marginBottom:3,cursor:'pointer',color:active?G.gd:G.mut}}>
+        <input type="checkbox" checked={active} onChange={e=>setOn(p=>({...p,[k]:e.target.checked}))}/>
+        {label}
+      </label>
+      <div style={{pointerEvents:active?'auto':'none'}}>{children}</div>
+    </div>
+  );
+}
+
+// Edit one product, or many at once. Same component — it just changes shape.
+function ProdEditOverlay({items,cats,onClose,onSaved}) {
+  const bulk = items.length > 1;
+  const one  = items[0];
+  const [on,setOn]         = useState({});
+  const [busy,setBusy]     = useState(false);
+  const [imgBusy,setImgBusy] = useState(false);
+  const [cutBg,setCutBg]   = useState(true);
+  const [f,setF] = useState(bulk
+    ? {cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:'',disc:'',bs:false,isNew:false}
+    : {name:one.name, upc:one.upc||'', cat:one.cat||'', unit:one.unit||'PCS',
+       pw:one.pw??'', gw:one.gw??'', sp:one.sp??'', cp:one.cp??'',
+       stock:one.stock??0, disc:one.disc??0, bs:!!one.bs, isNew:!!one.isNew, img:one.img||''});
+  const set = (k,v)=>setF(p=>({...p,[k]:v}));
+
+  async function handleImg(e){
+    const file=e.target.files[0]; if(!file) return;
+    setImgBusy(true);
+    try{
+      let up=file;
+      if(cutBg){ const r=await removeBackground(file); up=r.file; }
+      set('img', await uploadToBucket('product-images', up));
+    }catch(err){ alert(err.message); }
+    finally{ setImgBusy(false); e.target.value=''; }
+  }
+
+  async function save(){
+    if(busy||imgBusy) return;
+    const patch={};
+    if(bulk){
+      if(on.cat){ if(!f.cat){alert('Pick a category.');return;} patch.category=f.cat; }
+      if(on.unit)  patch.unit          = f.unit;
+      if(on.pw)    patch.pack_weight   = +f.pw    || 0;
+      if(on.gw)    patch.gross_weight  = +f.gw    || 0;
+      if(on.sp)    patch.selling_price = +f.sp    || 0;
+      if(on.cp)    patch.cost_price    = +f.cp    || 0;
+      if(on.stock) patch.stock         = +f.stock || 0;
+      if(on.disc){ patch.discount = +f.disc || 0; patch.on_offer = (+f.disc||0) > 0; }
+      if(on.bs)    patch.best_seller   = !!f.bs;
+      if(on.isNew) patch.is_new        = !!f.isNew;
+      if(Object.keys(patch).length===0){ alert('Tick at least one field to change.'); return; }
+    } else {
+      if(!f.name||!f.cat||f.sp===''||f.pw===''||f.gw===''){
+        alert('Name, Category, Packed Weight, Gross Weight and Selling Price are all required.'); return;
+      }
+      Object.assign(patch, toDbProduct({
+        ...f, pw:+f.pw, gw:+f.gw, sp:+f.sp, cp:+f.cp||0,
+        stock:+f.stock||0, disc:+f.disc||0, offer:(+f.disc||0)>0,
+      }));
+    }
+    setBusy(true);
+    // .select() makes the database report what it actually changed, rather than us
+    // assuming it worked and updating the screen for nothing.
+    const { data, error } = await supabase.from('products').update(patch).in('id', items.map(i=>i.id)).select();
+    setBusy(false);
+    if(error){ alert('Could not save:\n\n'+error.message); return; }
+    if(!data||data.length===0){ alert('The database updated 0 rows. Check your admin permissions.'); return; }
+    onSaved(data.map(fromDbProduct));
+    onClose();
+  }
+
+  // In bulk mode every field gets a tick-box; in single mode it's just the field.
+  const W = (k,label,node)=> bulk ? <BulkField on={on} setOn={setOn} k={k} label={label}>{node}</BulkField> : node;
+  const YN = [{v:'yes',l:'Yes'},{v:'no',l:'No'}];
+
+  return (
+    <Overlay title={bulk?`Edit ${items.length} Products`:`Edit — ${one.name}`} onClose={onClose} width={660}>
+      {bulk&&(
+        <div style={{background:G.gl,border:`1px solid ${G.g}`,borderRadius:9,padding:11,marginBottom:14,fontSize:11,color:G.tx,lineHeight:1.6}}>
+          <b style={{color:G.gd}}>Bulk edit — {items.length} products selected.</b><br/>
+          Tick a field to change it on all of them. Anything left unticked is <b>not touched</b>.
+          <div style={{marginTop:4,color:G.mut}}>{items.map(i=>i.name).join(' · ')}</div>
+        </div>
+      )}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 12px'}}>
+        {!bulk&&<FInput label="Product Name" value={f.name} onChange={v=>set('name',v)} req/>}
+        {!bulk&&<FInput label="UPC/Barcode" value={f.upc} onChange={v=>set('upc',v)}/>}
+        {W('cat',  'Category',            <FSel   label={bulk?'':'Category'}            value={f.cat}   onChange={v=>set('cat',v)}   options={cats}/>)}
+        {W('unit', 'Unit',                <FSel   label={bulk?'':'Unit'}                value={f.unit}  onChange={v=>set('unit',v)}  options={['PCS','KG','BOX','BOTTLE','PACK']}/>)}
+        {W('pw',   'Packed Weight (g)',   <FInput label={bulk?'':'Packed Weight (g)'}   value={f.pw}    onChange={v=>set('pw',v)}    type="number" req={!bulk}/>)}
+        {W('gw',   'Gross Weight (KG)',   <FInput label={bulk?'':'Gross Weight (KG)'}   value={f.gw}    onChange={v=>set('gw',v)}    type="number" req={!bulk}/>)}
+        {W('sp',   'Selling Price (RMB)', <FInput label={bulk?'':'Selling Price (RMB)'} value={f.sp}    onChange={v=>set('sp',v)}    type="number" req={!bulk}/>)}
+        {W('cp',   'Cost Price (RMB)',    <FInput label={bulk?'':'Cost Price (RMB)'}    value={f.cp}    onChange={v=>set('cp',v)}    type="number"/>)}
+        {W('stock','Stock Quantity',      <FInput label={bulk?'':'Stock Quantity'}      value={f.stock} onChange={v=>set('stock',v)} type="number"/>)}
+        {W('disc', 'Discount (%)',        <FInput label={bulk?'':'Discount (%)'}        value={f.disc}  onChange={v=>set('disc',v)}  type="number"/>)}
+        {bulk&&W('bs',    '⭐ Best Seller',  <FSel label="" value={f.bs?'yes':'no'}    onChange={v=>set('bs',    v==='yes')} options={YN}/>)}
+        {bulk&&W('isNew', '✨ New Arrival',  <FSel label="" value={f.isNew?'yes':'no'} onChange={v=>set('isNew', v==='yes')} options={YN}/>)}
+      </div>
+
+      <div style={{fontSize:10,color:G.mut,marginTop:-2,marginBottom:8}}>
+        Setting a discount above 0 automatically marks the product as “On Offer”.
+        Stock is the number the shop sells against — change it only to correct a miscount.
+      </div>
+
+      {!bulk&&(
+        <>
+          <div style={{display:'flex',gap:20,margin:'4px 0 12px'}}>
+            <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,cursor:'pointer',color:G.tx}}>
+              <input type="checkbox" checked={!!f.bs} onChange={e=>set('bs',e.target.checked)}/> ⭐ Best Seller
+            </label>
+            <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,cursor:'pointer',color:G.tx}}>
+              <input type="checkbox" checked={!!f.isNew} onChange={e=>set('isNew',e.target.checked)}/> ✨ New Arrival
+            </label>
+          </div>
+          <div style={{marginBottom:8}}>
+            <div style={{fontSize:11,fontWeight:'600',marginBottom:5,color:G.tx}}>Product Picture</div>
+            <input type="file" accept="image/*" onChange={handleImg} disabled={imgBusy} style={{fontSize:12}}/>
+            <label style={{display:'flex',alignItems:'center',gap:6,fontSize:11,color:G.tx,marginTop:7,cursor:imgBusy?'not-allowed':'pointer'}}>
+              <input type="checkbox" checked={cutBg} disabled={imgBusy} onChange={e=>setCutBg(e.target.checked)}/>
+              <span>Remove the plain background <span style={{color:G.mut}}>(best for products shot on white)</span></span>
+            </label>
+            {imgBusy&&<div style={{fontSize:11,color:G.bd,marginTop:6,fontWeight:'bold'}}>⏳ Processing and uploading…</div>}
+            {f.img&&!imgBusy&&<div style={{marginTop:8,width:96,height:96,borderRadius:8,border:`1px solid ${G.brd}`,...CHECKER,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}><img src={f.img} alt="Product preview" style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain'}}/></div>}
+            <div style={{fontSize:10,color:G.mut,marginTop:5}}>Leave this alone to keep the current picture.</div>
+          </div>
+        </>
+      )}
+
+      <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}}>
+        <Btn v='outline' onClick={onClose}>Cancel</Btn>
+        <Btn onClick={save} disabled={busy||imgBusy}>{busy?'Saving…':'Save Changes'}</Btn>
+      </div>
+    </Overlay>
+  );
+}
+
+// Edit one inventory batch, or many at once.
+function InvEditOverlay({items,cats,prods,setProds,onClose,onSaved}) {
+  const bulk = items.length > 1;
+  const one  = items[0];
+  const [on,setOn]     = useState({});
+  const [busy,setBusy] = useState(false);
+  const [f,setF] = useState(bulk
+    ? {cat:'',qty:'',exp:'',sp:'',cp:'',pw:''}
+    : {name:one.name, cat:one.cat||'', qty:one.qty??'', exp:one.exp||'',
+       sp:one.sp??'', cp:one.cp??'', pw:one.pw??'', upc:one.upc||'', date:one.date||''});
+  const set = (k,v)=>setF(p=>({...p,[k]:v}));
+
+  async function save(){
+    if(busy) return;
+    const patch={};
+    // How each product's stock has to move. products.stock is the number the shop
+    // actually sells against, so changing a batch's quantity must move it too —
+    // otherwise the shelf and the shop would disagree.
+    const deltas={};
+
+    if(bulk){
+      if(on.cat){ if(!f.cat){alert('Pick a category.');return;} patch.category=f.cat; }
+      if(on.exp) patch.expiry_date   = f.exp || null;
+      if(on.sp)  patch.selling_price = +f.sp || 0;
+      if(on.cp)  patch.cost_price    = +f.cp || 0;
+      if(on.pw)  patch.pack_weight   = +f.pw || 0;
+      if(on.qty){
+        const nq = +f.qty || 0;
+        if(nq < 0){ alert('Quantity cannot be negative.'); return; }
+        patch.qty = nq;
+        items.forEach(it=>{ deltas[it.name] = (deltas[it.name]||0) + (nq - (+it.qty||0)); });
+      }
+      if(Object.keys(patch).length===0){ alert('Tick at least one field to change.'); return; }
+    } else {
+      if(!f.name || f.qty===''){ alert('Product Name and Qty are required.'); return; }
+      const nq = +f.qty || 0;
+      if(nq < 0){ alert('Quantity cannot be negative.'); return; }
+      // If the name now matches a product, re-link the batch to it.
+      const matched = prods.find(p=>p.name===f.name);
+      patch.product_id    = matched ? matched.id : null;
+      patch.name          = f.name;
+      patch.category      = f.cat || null;
+      patch.qty           = nq;
+      patch.expiry_date   = f.exp || null;
+      patch.selling_price = +f.sp || 0;
+      patch.cost_price    = +f.cp || 0;
+      patch.pack_weight   = +f.pw || 0;
+      patch.upc           = f.upc || null;
+      if(f.date) patch.date = f.date;
+      // The units leave the old product and land on the new one. If the name didn't
+      // change, these two cancel out into a simple difference.
+      deltas[one.name] = (deltas[one.name]||0) - (+one.qty||0);
+      deltas[f.name]   = (deltas[f.name]  ||0) + nq;
+    }
+
+    setBusy(true);
+    const { data, error } = await supabase.from('inventory').update(patch).in('id', items.map(i=>i.id)).select();
+    if(error){ setBusy(false); alert('Could not save:\n\n'+error.message); return; }
+    if(!data||data.length===0){ setBusy(false); alert('The database updated 0 rows. Check your admin permissions.'); return; }
+
+    // Move the stock counters to match.
+    for(const name of Object.keys(deltas)){
+      const d = deltas[name];
+      if(!d) continue;
+      const prod = prods.find(p=>p.name===name);
+      if(!prod) continue;
+      const newStock = Math.max(0, (prod.stock||0) + d);
+      const { error: sErr } = await supabase.from('products').update({stock:newStock}).eq('id',prod.id);
+      if(sErr){ alert(`The batch was saved, but the stock count for "${name}" could not be updated:\n\n${sErr.message}`); continue; }
+      setProds(p=>p.map(x=>x.id===prod.id?{...x,stock:newStock}:x));
+    }
+
+    setBusy(false);
+    onSaved(data.map(fromDbInv));
+    onClose();
+  }
+
+  const W = (k,label,node)=> bulk ? <BulkField on={on} setOn={setOn} k={k} label={label}>{node}</BulkField> : node;
+  const qtyDelta = (!bulk && f.qty!=='') ? (+f.qty||0) - (+one.qty||0) : 0;
+
+  return (
+    <Overlay title={bulk?`Edit ${items.length} Inventory Batches`:`Edit Batch — ${one.name}`} onClose={onClose} width={660}>
+      {bulk&&(
+        <div style={{background:G.gl,border:`1px solid ${G.g}`,borderRadius:9,padding:11,marginBottom:14,fontSize:11,color:G.tx,lineHeight:1.6}}>
+          <b style={{color:G.gd}}>Bulk edit — {items.length} batches selected.</b><br/>
+          Tick a field to change it on all of them. Anything left unticked is <b>not touched</b>.
+          <div style={{marginTop:4,color:G.mut}}>Changing Qty sets every selected batch to that number, and moves each product's stock to match.</div>
+        </div>
+      )}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'0 12px'}}>
+        {!bulk&&<FInput label="Product Name" value={f.name} onChange={v=>set('name',v)} req/>}
+        {!bulk&&<FInput label="Date Received" value={f.date} onChange={v=>set('date',v)} type="date"/>}
+        {W('cat','Category',            <FSel   label={bulk?'':'Category'}            value={f.cat} onChange={v=>set('cat',v)} options={cats}/>)}
+        {W('qty','Quantity',            <FInput label={bulk?'':'Quantity'}            value={f.qty} onChange={v=>set('qty',v)} type="number" req={!bulk}/>)}
+        {W('exp','Expiry Date',         <FInput label={bulk?'':'Expiry Date'}         value={f.exp} onChange={v=>set('exp',v)} type="date"/>)}
+        {W('sp', 'Selling Price (RMB)', <FInput label={bulk?'':'Selling Price (RMB)'} value={f.sp}  onChange={v=>set('sp',v)}  type="number"/>)}
+        {W('cp', 'Cost Price (RMB)',    <FInput label={bulk?'':'Cost Price (RMB)'}    value={f.cp}  onChange={v=>set('cp',v)}  type="number"/>)}
+        {W('pw', 'Packed Weight (g)',   <FInput label={bulk?'':'Packed Weight (g)'}   value={f.pw}  onChange={v=>set('pw',v)}  type="number"/>)}
+        {!bulk&&<FInput label="UPC/Barcode" value={f.upc} onChange={v=>set('upc',v)}/>}
+      </div>
+
+      {!bulk&&qtyDelta!==0&&(
+        <div style={{background:qtyDelta>0?G.gl:'#FFF3E0',border:`1px solid ${qtyDelta>0?G.g:G.yd}`,borderRadius:8,padding:10,marginBottom:10,fontSize:12,color:G.tx}}>
+          Quantity {qtyDelta>0?'up':'down'} by <b>{Math.abs(qtyDelta)}</b> — the stock count for “{f.name}” will change by <b>{qtyDelta>0?'+':''}{qtyDelta}</b> when you save.
+        </div>
+      )}
+      {!bulk&&f.name!==one.name&&(
+        <div style={{background:'#FFF3E0',border:`1px solid ${G.yd}`,borderRadius:8,padding:10,marginBottom:10,fontSize:12,color:G.tx}}>
+          You've renamed this batch. Its {one.qty} unit(s) will move off “{one.name}” and onto “{f.name}”.
+        </div>
+      )}
+
+      <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:10}}>
+        <Btn v='outline' onClick={onClose}>Cancel</Btn>
+        <Btn onClick={save} disabled={busy}>{busy?'Saving…':'Save Changes'}</Btn>
+      </div>
+    </Overlay>
+  );
+}
+
 function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,orders,sales}) {
   const [q,setQ]=useState('');
   const [sel,setSel]=useState([]);
@@ -1697,6 +1961,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
   const [discPct,setDiscPct]=useState(10);
   const [conf,setConf]=useState(null);
   const [delBusy,setDelBusy]=useState(false);
+  const [editing,setEditing]=useState(null);   // array of products being edited
   const [np,setNp]=useState({name:'',upc:'',cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:0,disc:0,img:''});
   // products.stock is the single source of truth now. This used to override the
   // displayed stock with the sum of inventory batches, which disagreed with reality
@@ -1812,6 +2077,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <Btn onClick={()=>setShowAdd(true)}>+ Add Product</Btn>
           <Btn v='info' sm onClick={()=>setShowCatMgr(true)}>🎨 Categories</Btn>
+          {sel.length>0&&<Btn v='info' sm onClick={()=>setEditing(prods.filter(p=>sel.includes(p.id)))}>✏️ Edit ({sel.length})</Btn>}
           {sel.length>0&&!discMode&&<Btn v='warn' sm onClick={()=>setDiscMode(true)}>% Discount</Btn>}
           {discMode&&sel.length>0&&<><input type="number" value={discPct} onChange={e=>setDiscPct(+e.target.value)} style={{width:55,padding:'4px 6px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/><Btn v='warn' sm onClick={applyDisc}>Apply</Btn><Btn v='danger' sm onClick={removeDisc}>Remove</Btn><Btn v='outline' sm onClick={()=>{setDiscMode(false);setSel([]);}}>Cancel</Btn></>}
           {sel.length>0&&<Btn v='danger' sm disabled={delBusy} onClick={()=>{
@@ -1835,7 +2101,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:950}}>
           <thead><tr style={{background:G.gd,color:G.w}}>
             <th style={{padding:'9px 7px',textAlign:'center'}}><input type="checkbox" checked={allSel} onChange={toggleAll}/></th>
-            {['ID','Picture','Product Name','UPC/Barcode','Category','Unit','Packed (g)','Gross (KG)','Sell (RMB)','Cost (RMB)','Stock','Discount'].map(h=>(
+            {['ID','Picture','Product Name','UPC/Barcode','Category','Unit','Packed (g)','Gross (KG)','Sell (RMB)','Cost (RMB)','Stock','Discount','Edit'].map(h=>(
               <th key={h} style={{padding:'9px 7px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
             ))}
           </tr></thead>
@@ -1854,6 +2120,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
               <td style={{padding:'7px',textAlign:'center'}}>{p.cp?`¥${p.cp}`:'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}><span style={{...stStyle(p.stock),padding:'2px 8px',borderRadius:5,display:'inline-block'}}>{p.stock}</span></td>
               <td style={{padding:'7px',textAlign:'center'}}>{p.disc>0?<span style={{color:'#B71C1C',fontWeight:'bold'}}>{p.disc}%</span>:'—'}</td>
+              <td style={{padding:'7px',textAlign:'center'}}><button onClick={()=>setEditing([p])} title={`Edit ${p.name}`} style={{background:'none',border:'none',cursor:'pointer',fontSize:15,lineHeight:1}}>✏️</button></td>
             </tr>
           );})}</tbody>
         </table>
@@ -1887,6 +2154,8 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
           <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}}><Btn v='outline' onClick={()=>setShowAdd(false)}>Cancel</Btn><Btn onClick={addProd}>Save Product</Btn></div>
         </Overlay>
       )}
+      {editing&&<ProdEditOverlay items={editing} cats={cats} onClose={()=>setEditing(null)}
+        onSaved={updated=>{ setProds(p=>p.map(x=>{const u=updated.find(y=>y.id===x.id); return u?{...x,...u}:x;})); setSel([]); }}/>}
       {showCatMgr&&<CatManageOverlay cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} prods={prods} onClose={()=>setShowCatMgr(false)}/>}
     </div>
   );
@@ -1898,6 +2167,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
   const [showAdd,setShowAdd]=useState(false);
   const [srch,setSrch]=useState('');
   const [conf,setConf]=useState(null);
+  const [editing,setEditing]=useState(null);   // array of batches being edited
   const [ni,setNi]=useState({name:'',cat:'',qty:'',exp:'',sp:'',cp:'',pw:'',upc:''});
   const baseList=useMemo(()=>{
     let r=inv;
@@ -2017,7 +2287,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
       {conf&&<ConfirmDlg msg={conf.msg} onYes={conf.yes} onNo={()=>setConf(null)}/>}
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
         <div style={{fontSize:19,fontWeight:'bold',color:G.dk}}>🏭 Inventory</div>
-        <div style={{display:'flex',gap:6}}><Btn onClick={()=>setShowAdd(true)}>+ Add Items</Btn>{sel.length>0&&<Btn v='danger' onClick={()=>setConf({msg:`Remove ${sel.length} item(s) from inventory?`,yes:doRemove})}>Remove ({sel.length})</Btn>}</div>
+        <div style={{display:'flex',gap:6}}><Btn onClick={()=>setShowAdd(true)}>+ Add Items</Btn>{sel.length>0&&<Btn v='info' onClick={()=>setEditing(inv.filter(i=>sel.includes(i.id)))}>✏️ Edit ({sel.length})</Btn>}{sel.length>0&&<Btn v='danger' onClick={()=>setConf({msg:`Remove ${sel.length} item(s) from inventory?`,yes:doRemove})}>Remove ({sel.length})</Btn>}</div>
       </div>
       <div style={{display:'flex',gap:12,marginBottom:12,flexWrap:'wrap',fontSize:11,alignItems:'center'}}>
         {[{c:'#FFCDD2',l:'Expired'},{c:'#BBDEFB',l:'<3 months'},{c:'#FFF9C4',l:'<6 months'},{c:'#C8E6C9',l:'>1 year'}].map(k=>(
@@ -2030,7 +2300,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:850}}>
           <thead><tr style={{background:G.gd,color:G.w}}>
             <th style={{padding:'9px 7px',textAlign:'center'}}><input type="checkbox" checked={allSel} onChange={toggleAll}/></th>
-            {['SI.','Date','Time','Product Name','Category','Qty','Expiry Date','Sell','Cost','Packed (g)','UPC'].map(h=>(
+            {['SI.','Date','Time','Product Name','Category','Qty','Expiry Date','Sell','Cost','Packed (g)','UPC','Edit'].map(h=>(
               <th key={h} style={{padding:'9px 7px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
             ))}
           </tr></thead>
@@ -2048,6 +2318,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
               <td style={{padding:'7px',textAlign:'center'}}>{item.cp?`¥${item.cp}`:'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}>{item.pw}</td>
               <td style={{padding:'7px',textAlign:'center',fontSize:10,color:G.mut}}>{item.upc||'—'}</td>
+              <td style={{padding:'7px',textAlign:'center'}}><button onClick={()=>setEditing([item])} title={`Edit this batch of ${item.name}`} style={{background:'none',border:'none',cursor:'pointer',fontSize:15,lineHeight:1}}>✏️</button></td>
             </tr>
           );})}</tbody>
         </table>
@@ -2093,6 +2364,8 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
           <div style={{fontSize:10,color:G.mut,marginTop:8}}>Restoring puts the batch back into inventory and adds its quantity to the product's stock. Deleting forever cannot be undone.</div>
         </Card>
       )}
+      {editing&&<InvEditOverlay items={editing} cats={cats} prods={prods} setProds={setProds} onClose={()=>setEditing(null)}
+        onSaved={updated=>{ setInv(p=>p.map(x=>{const u=updated.find(y=>y.id===x.id); return u||x;})); setSel([]); }}/>}
       {showAdd&&(
         <Overlay title="Add Inventory Item" onClose={()=>setShowAdd(false)} width={520}>
           <div style={{position:'relative',marginBottom:14}}>
