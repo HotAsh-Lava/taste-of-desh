@@ -364,10 +364,10 @@ function PCard({p,addToCart}) {
     <div style={{background:G.w,borderRadius:14,padding:14,boxShadow:'0 2px 8px rgba(20,40,25,0.07)',border:`1px solid ${G.brd}`,display:'flex',flexDirection:'column',position:'relative'}}>
       {p.isNew&&<span style={{position:'absolute',top:10,left:10,background:G.bd,color:G.w,borderRadius:6,padding:'2px 7px',fontSize:9,fontWeight:'bold'}}>NEW</span>}
       {p.img
-        ? <div style={{width:'100%',height:96,borderRadius:10,marginBottom:8,background:G.bg,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}>
+        ? <div style={{width:'100%',height:126,borderRadius:10,marginBottom:8,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}>
             <img src={p.img} alt={p.name} style={{maxWidth:'100%',maxHeight:'100%',width:'auto',height:'auto',objectFit:'contain',display:'block'}}/>
           </div>
-        : <div style={{fontSize:42,textAlign:'center',marginBottom:8,height:96,display:'flex',alignItems:'center',justifyContent:'center'}}>{ICONS[p.cat]||'📦'}</div>
+        : <div style={{fontSize:50,textAlign:'center',marginBottom:8,height:126,display:'flex',alignItems:'center',justifyContent:'center'}}>{ICONS[p.cat]||'📦'}</div>
       }
       <span style={{background:G.bg2,color:G.tx,borderRadius:8,padding:'2px 8px',fontSize:10,fontWeight:'bold',alignSelf:'flex-start',marginBottom:6}}>{p.cat}</span>
       <div style={{fontSize:12,fontWeight:'bold',color:G.dk,marginBottom:4,lineHeight:1.35,flex:1}}>{p.name}</div>
@@ -409,8 +409,13 @@ function Slideshow({slides,addToCart}) {
         </>
       ) : (
         <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',padding:'0 18px',gap:14}}>
-          <div style={{flexShrink:0,width:74,height:74,borderRadius:14,background:'rgba(255,255,255,0.18)',display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}>
-            {s.product.img?<img src={s.product.img} alt={s.product.name} style={{width:'100%',height:'100%',objectFit:'contain'}}/>:<span style={{fontSize:38}}>{ICONS[s.product.cat]||'📦'}</span>}
+          {/* No plate behind a real photo — with the backdrop stripped out, the product
+              sits directly on the gradient. drop-shadow (not box-shadow) follows the
+              alpha channel, so it traces the product's outline rather than a square. */}
+          <div style={{flexShrink:0,width:98,height:98,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',background:s.product.img?'transparent':'rgba(255,255,255,0.18)'}}>
+            {s.product.img
+              ? <img src={s.product.img} alt={s.product.name} style={{width:'100%',height:'100%',objectFit:'contain',filter:'drop-shadow(0 3px 8px rgba(0,0,0,0.35))'}}/>
+              : <span style={{fontSize:46}}>{ICONS[s.product.cat]||'📦'}</span>}
           </div>
           <div style={{flex:1,minWidth:0}}>
             <div style={{background:'rgba(255,255,255,0.22)',display:'inline-block',borderRadius:8,padding:'2px 9px',fontSize:11,fontWeight:'bold',marginBottom:6}}>{tagMap[s.kind]}</div>
@@ -545,10 +550,10 @@ function CartTab({cart,prods,rawTotal,discTotal,hasDsc,totalGW,courierFee,grandT
         return(
           <div key={item.id} style={{background:G.w,borderRadius:14,padding:14,marginBottom:10,boxShadow:'0 2px 6px rgba(20,40,25,0.06)',display:'flex',gap:12,alignItems:'flex-start'}}>
             {item.img
-              ? <div style={{width:52,height:52,flexShrink:0,borderRadius:10,background:G.bg,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}>
+              ? <div style={{width:60,height:60,flexShrink:0,borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}>
                   <img src={item.img} alt={item.name} style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain',display:'block'}}/>
                 </div>
-              : <div style={{fontSize:36,flexShrink:0}}>{ICONS[item.cat]||'📦'}</div>}
+              : <div style={{fontSize:38,flexShrink:0}}>{ICONS[item.cat]||'📦'}</div>}
             <div style={{flex:1}}>
               <div style={{fontWeight:'bold',fontSize:12,color:G.dk,marginBottom:2}}>
                 {item.name}
@@ -591,6 +596,145 @@ function CartTab({cart,prods,rawTotal,discTotal,hasDsc,totalGW,courierFee,grandT
       {!auth?.loggedIn&&<div style={{textAlign:'center',fontSize:11,color:G.mut,marginTop:8}}>Your cart will be kept while you sign in.</div>}
     </div>
   );
+}
+
+// A checkerboard, so a transparent image reads as transparent in a preview
+// instead of looking like it has a white background.
+const CHECKER = {
+  backgroundColor:'#FFFFFF',
+  backgroundImage:'linear-gradient(45deg,#E4E7E4 25%,transparent 25%),linear-gradient(-45deg,#E4E7E4 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#E4E7E4 75%),linear-gradient(-45deg,transparent 75%,#E4E7E4 75%)',
+  backgroundSize:'12px 12px',
+  backgroundPosition:'0 0,0 6px,6px -6px,-6px 0px',
+};
+
+// ==================== Background removal ====================
+// Product photos are almost always shot on a plain white backdrop. That white is
+// baked into the JPEG, so the picture shows up as a white rectangle whenever it
+// sits on a coloured surface (like the blue slideshow card).
+//
+// This strips it out: it samples the four corners to learn the backdrop colour,
+// then flood-fills INWARD from the edges, turning every matching pixel that is
+// *connected to the border* transparent. White pixels inside the product — text on
+// the packet, a white label — are kept, because they aren't reachable from the edge.
+//
+// Finally it crops away the empty margin, which is what makes the product look
+// bigger: it fills its card instead of floating in a sea of blank space.
+//
+// Returns { file, removed }. If the photo has no clean backdrop, it hands the
+// original straight back rather than destroying it.
+async function removeBackground(file, tolerance = 34) {
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload  = () => res(i);
+    i.onerror = () => rej(new Error('That image could not be read.'));
+    i.src = URL.createObjectURL(file);
+  });
+
+  const MAX = 900;   // keeps the resulting PNG a sensible size
+  const scale = Math.min(1, MAX / Math.max(img.width, img.height));
+  const w = Math.max(1, Math.round(img.width  * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+
+  const cv  = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, w, h);
+  URL.revokeObjectURL(img.src);
+
+  const id = ctx.getImageData(0, 0, w, h);
+  const d  = id.data;
+
+  // What colour IS the backdrop? Average the four corners.
+  let br = 0, bg = 0, bb = 0;
+  [[0,0], [w-1,0], [0,h-1], [w-1,h-1]].forEach(([x,y]) => {
+    const k = (y*w + x) * 4;
+    br += d[k]; bg += d[k+1]; bb += d[k+2];
+  });
+  br /= 4; bg /= 4; bb /= 4;
+
+  const near = (px) => {
+    const k = px * 4;
+    return Math.abs(d[k]   - br) <= tolerance
+        && Math.abs(d[k+1] - bg) <= tolerance
+        && Math.abs(d[k+2] - bb) <= tolerance;
+  };
+
+  // Flood fill inward from every border pixel.
+  const visited = new Uint8Array(w * h);
+  const stack   = new Int32Array(w * h);
+  let sp = 0;
+  const push = (px) => { if (!visited[px]) { visited[px] = 1; stack[sp++] = px; } };
+
+  for (let x = 0; x < w; x++) { push(x); push((h-1)*w + x); }
+  for (let y = 0; y < h; y++) { push(y*w); push(y*w + w - 1); }
+
+  let cleared = 0;
+  while (sp > 0) {
+    const px = stack[--sp];
+    if (!near(px)) continue;          // hit the product — stop, don't expand through it
+    d[px*4 + 3] = 0;
+    cleared++;
+    const x = px % w, y = (px - x) / w;
+    if (x > 0)     push(px - 1);
+    if (x < w - 1) push(px + 1);
+    if (y > 0)     push(px - w);
+    if (y < h - 1) push(px + w);
+  }
+
+  // Almost everything vanished? Then there was no backdrop to speak of —
+  // it's a photo with a busy background. Leave the original alone.
+  if (cleared > 0.92 * w * h || cleared < 0.02 * w * h) {
+    return { file, removed: false };
+  }
+
+  // Soften the cut edge so it doesn't look snipped out with scissors.
+  const snap = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < w*h; i++) snap[i] = d[i*4 + 3];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const px = y*w + x;
+      if (snap[px] === 0) continue;
+      let sum = 0, cnt = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          sum += snap[ny*w + nx]; cnt++;
+        }
+      }
+      d[px*4 + 3] = Math.round(sum / cnt);
+    }
+  }
+  ctx.putImageData(id, 0, 0);
+
+  // Crop to what's actually left, so the product fills the frame.
+  let minX = w, minY = h, maxX = -1, maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (d[(y*w + x)*4 + 3] > 8) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (maxX < minX || maxY < minY) return { file, removed: false };
+
+  const cw  = maxX - minX + 1;
+  const ch  = maxY - minY + 1;
+  const pad = Math.round(Math.max(cw, ch) * 0.03);
+
+  const out = document.createElement('canvas');
+  out.width  = cw + pad*2;
+  out.height = ch + pad*2;
+  out.getContext('2d').drawImage(cv, minX, minY, cw, ch, pad, pad, cw, ch);
+
+  const blob = await new Promise(res => out.toBlob(res, 'image/png'));
+  if (!blob) return { file, removed: false };
+
+  const base = (file.name || 'product').replace(/\.[^.]+$/, '');
+  return { file: new File([blob], base + '.png', { type: 'image/png' }), removed: true };
 }
 
 // ==================== Supabase Storage upload helper ====================
@@ -1435,6 +1579,13 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
         <div style={{fontSize:11,color:G.mut,marginBottom:12}}>Upload pictures to feature them in the rotating slideshow at the top of the customer Home page.</div>
         <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end',marginBottom:14}}>
           <div style={{flex:1,minWidth:160}}><FInput label="Caption (optional)" value={capt} onChange={setCapt}/></div>
+          <div style={{background:G.gl,border:`1px solid ${G.g}`,borderRadius:9,padding:11,marginBottom:11,fontSize:11,color:G.tx,lineHeight:1.65}}>
+            <div style={{fontWeight:'bold',color:G.gd,fontSize:12,marginBottom:3}}>📐 Recommended size: 1200 × 576 px</div>
+            The slideshow panel is a wide landscape banner — roughly <b>2 parts wide to 1 part tall</b>.
+            Any size will work: the picture is scaled to fit and a blurred copy of it fills whatever is left over.
+            But an image at this ratio fills the panel edge to edge, with no blurred border.
+            <div style={{marginTop:4,color:G.mut}}>Keep important text out of the bottom strip — that's where the caption sits.</div>
+          </div>
           <div style={{marginBottom:10}}>
             <input type="file" accept="image/*" onChange={handleSlideImg} disabled={upBusy==='slide'} style={{fontSize:12}}/>
             {upBusy==='slide'&&<div style={{fontSize:11,color:G.bd,fontWeight:'bold',marginTop:4}}>⏳ Uploading…</div>}
@@ -1446,7 +1597,7 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
             <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
               {customSlides.map(s=>(
                 <div key={s.id} style={{position:'relative',width:140}}>
-                  <img src={s.img} alt={s.caption||'Slide'} style={{width:140,height:90,objectFit:'contain',borderRadius:9,border:`1px solid ${G.brd}`,display:'block',background:G.bg}}/>
+                  <img src={s.img} alt={s.caption||'Slide'} style={{width:140,height:90,objectFit:'contain',borderRadius:9,border:`1px solid ${G.brd}`,display:'block',...CHECKER}}/>
                   {s.caption&&<div style={{fontSize:10,color:G.tx,marginTop:4,maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.caption}</div>}
                   <button onClick={()=>delSlide(s.id)} style={{position:'absolute',top:4,right:4,background:'rgba(0,0,0,0.55)',color:'#fff',border:'none',borderRadius:'50%',width:22,height:22,cursor:'pointer',fontSize:12}}>✕</button>
                 </div>
@@ -1555,15 +1706,28 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
     return [...r].sort((a,b)=>{const ca=cats.indexOf(a.cat),cb=cats.indexOf(b.cat); if(ca!==cb) return ca-cb; return a.name.localeCompare(b.name);});
   },[synced,q,cats]);
   const [imgBusy,setImgBusy]=useState(false);
-  // Product pictures now go to Supabase Storage and we keep only the URL.
-  // They used to be stored as base64 inside products.image_url, which meant
-  // every single product fetch dragged the full image bytes across the network.
+  const [cutBg,setCutBg]=useState(true);
+  const [imgNote,setImgNote]=useState('');
+  // Product pictures go to Supabase Storage and we keep only the URL. They used to
+  // be stored as base64 inside products.image_url, which meant every product fetch
+  // dragged the full image bytes across the network.
+  // With "remove background" ticked, the plain white backdrop is stripped out first
+  // and the empty margin cropped away, so the product sits cleanly on any colour.
   async function handleImg(e){
     const f=e.target.files[0]; if(!f) return;
-    setImgBusy(true);
+    setImgBusy(true); setImgNote('');
     try{
-      const url = await uploadToBucket('product-images', f);
+      let file=f, note='';
+      if(cutBg){
+        const res=await removeBackground(f);
+        file=res.file;
+        note=res.removed
+          ? 'Background removed. The product will sit cleanly on any colour.'
+          : 'No plain backdrop was found, so the photo was uploaded unchanged.';
+      }
+      const url=await uploadToBucket('product-images', file);
       setNp(p=>({...p,img:url}));
+      setImgNote(note);
     }catch(err){ alert(err.message); }
     finally{ setImgBusy(false); e.target.value=''; }
   }
@@ -1624,7 +1788,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
             <tr key={p.id} style={{background:isS?G.gl:i%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
               <td style={{padding:'7px',textAlign:'center'}}><input type="checkbox" checked={isS} onChange={()=>tog(p.id)}/></td>
               <td style={{padding:'7px',textAlign:'center',color:G.mut}}>{p.id}</td>
-              <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} alt={p.name} style={{width:34,height:34,objectFit:'contain',borderRadius:6,background:G.bg}}/>:<span style={{fontSize:22}}>{ICONS[p.cat]||'📦'}</span>}</td>
+              <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} alt={p.name} style={{width:40,height:40,objectFit:'contain',borderRadius:6}}/>:<span style={{fontSize:24}}>{ICONS[p.cat]||'📦'}</span>}</td>
               <td style={{padding:'7px'}}><div style={{fontWeight:'bold'}}>{p.name}</div>{p.offer&&<span style={{background:'#FFCDD2',color:'#B71C1C',borderRadius:4,padding:'1px 5px',fontSize:10,fontWeight:'bold'}}>On Offer</span>}</td>
               <td style={{padding:'7px',textAlign:'center',color:G.mut,fontSize:11}}>{p.upc||'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}><CatChip cat={p.cat} catColors={catColors}/></td>
@@ -1657,8 +1821,13 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
           <div style={{marginTop:6,marginBottom:6}}>
             <div style={{fontSize:11,fontWeight:'600',marginBottom:5}}>Product Picture <span style={{color:'#B71C1C'}}>*</span> <span style={{color:G.mut,fontWeight:'normal'}}>(required)</span></div>
             <input type="file" accept="image/*" onChange={handleImg} disabled={imgBusy} style={{fontSize:12}}/>
-            {imgBusy&&<div style={{fontSize:11,color:G.bd,marginTop:6,fontWeight:'bold'}}>⏳ Uploading image…</div>}
-            {np.img&&!imgBusy&&<div style={{marginTop:8,width:74,height:74,borderRadius:8,border:`1px solid ${G.brd}`,background:G.bg,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}><img src={np.img} alt="Product preview" style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain'}}/></div>}
+            <label style={{display:'flex',alignItems:'center',gap:6,fontSize:11,color:G.tx,marginTop:7,cursor:imgBusy?'not-allowed':'pointer'}}>
+              <input type="checkbox" checked={cutBg} disabled={imgBusy} onChange={e=>setCutBg(e.target.checked)}/>
+              <span>Remove the plain background <span style={{color:G.mut}}>(best for products shot on white)</span></span>
+            </label>
+            {imgBusy&&<div style={{fontSize:11,color:G.bd,marginTop:6,fontWeight:'bold'}}>⏳ Processing and uploading…</div>}
+            {imgNote&&!imgBusy&&<div style={{fontSize:11,color:G.gd,marginTop:6}}>{imgNote}</div>}
+            {np.img&&!imgBusy&&<div style={{marginTop:8,width:96,height:96,borderRadius:8,border:`1px solid ${G.brd}`,...CHECKER,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}><img src={np.img} alt="Product preview" style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain'}}/></div>}
           </div>
           <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}}><Btn v='outline' onClick={()=>setShowAdd(false)}>Cancel</Btn><Btn onClick={addProd}>Save Product</Btn></div>
         </Overlay>
