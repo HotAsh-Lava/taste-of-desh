@@ -262,9 +262,10 @@ function CatChip({cat,catColors}) {
 function ConfirmDlg({msg,onYes,onNo}) {
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:3000,display:'flex',alignItems:'center',justifyContent:'center'}}>
-      <div style={{background:G.w,borderRadius:14,padding:24,maxWidth:340,textAlign:'center',boxShadow:'0 8px 24px rgba(0,0,0,0.2)'}}>
+      <div style={{background:G.w,borderRadius:14,padding:24,maxWidth:420,textAlign:'center',boxShadow:'0 8px 24px rgba(0,0,0,0.2)'}}>
         <div style={{fontSize:36,marginBottom:10}}>⚠️</div>
-        <div style={{fontSize:14,color:G.tx,marginBottom:20,lineHeight:1.5}}>{msg}</div>
+        {/* pre-line so a confirmation can spell out exactly what it's about to do */}
+        <div style={{fontSize:14,color:G.tx,marginBottom:20,lineHeight:1.6,whiteSpace:'pre-line',textAlign:'left'}}>{msg}</div>
         <div style={{display:'flex',gap:10,justifyContent:'center'}}>
           <Btn v='outline' onClick={onNo}>Cancel</Btn>
           <Btn v='danger' onClick={onYes}>Confirm</Btn>
@@ -1687,7 +1688,7 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
   );
 }
 
-function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
+function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,orders,sales}) {
   const [q,setQ]=useState('');
   const [sel,setSel]=useState([]);
   const [showAdd,setShowAdd]=useState(false);
@@ -1695,6 +1696,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
   const [discMode,setDiscMode]=useState(false);
   const [discPct,setDiscPct]=useState(10);
   const [conf,setConf]=useState(null);
+  const [delBusy,setDelBusy]=useState(false);
   const [np,setNp]=useState({name:'',upc:'',cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:0,disc:0,img:''});
   // products.stock is the single source of truth now. This used to override the
   // displayed stock with the sum of inventory batches, which disagreed with reality
@@ -1741,10 +1743,53 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
     setProds(p=>[...p, fromDbProduct(data)]);
     setNp({name:'',upc:'',cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:0,disc:0,img:''});setShowAdd(false);
   }
+  // Work out what deleting the selected products will actually touch, so the
+  // confirmation can say so plainly instead of the admin finding out afterwards.
+  function deleteImpact(){
+    const picked = prods.filter(p=>sel.includes(p.id));
+    const names  = picked.map(p=>p.name);
+    const hit    = (it)=> (it.pid && sel.includes(it.pid)) || names.includes(it.name);
+    const nOrders  = (orders||[]).filter(o=>(o.items||[]).some(hit)).length;
+    const nSales   = (sales ||[]).filter(s=>(s.items||[]).some(hit)).length;
+    const batches  = (inv   ||[]).filter(i=>names.includes(i.name));
+    const units    = batches.reduce((sum,i)=>sum+(+i.qty||0),0);
+    return { names, nOrders, nSales, nBatches: batches.length, units };
+  }
+
   async function doDelete(){
-    const { error } = await supabase.from('products').delete().in('id', sel);
-    if(error){alert('Failed to delete: '+error.message);return;}
-    setProds(p=>p.filter(x=>!sel.includes(x.id)));setSel([]);setConf(null);
+    if(delBusy) return;
+    setDelBusy(true);
+    try{
+      // .select() forces the database to report exactly which rows it removed.
+      // Without it, a delete that RLS quietly refuses looks like a success: the row
+      // would disappear from the screen and come back on the next page refresh.
+      const { data, error } = await supabase.from('products').delete().in('id', sel).select();
+
+      if(error){
+        // The most common failure is a foreign key: the product is still referenced
+        // by an order, a sale, or an inventory batch. Say so in plain English.
+        const fk = /foreign key constraint/i.test(error.message||'');
+        alert(fk
+          ? 'The database would not delete this product because other records still point at it.\n\n'
+            + 'Run the "product delete" SQL in Supabase (step 9) — it tells the database to keep your order and sales history while letting the product go.\n\n'
+            + 'Details: ' + error.message
+          : 'Could not delete:\n\n' + error.message);
+        return;
+      }
+
+      if(!data || data.length===0){
+        alert('The database removed 0 rows.\n\nThat usually means the products table has no DELETE policy for admins.');
+        return;
+      }
+
+      const goneIds   = data.map(d=>d.id);
+      const goneNames = data.map(d=>d.name);
+      setProds(p=>p.filter(x=>!goneIds.includes(x.id)));
+      // Inventory batches for these products are removed by the database (cascade),
+      // so clear them from the screen too rather than leaving ghosts behind.
+      if(setInv) setInv(p=>p.filter(i=>!goneNames.includes(i.name)));
+      setSel([]); setConf(null);
+    } finally { setDelBusy(false); }
   }
   async function applyDisc(){
     const { error } = await supabase.from('products').update({ discount: discPct, on_offer: discPct>0 }).in('id', sel);
@@ -1769,7 +1814,17 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
           <Btn v='info' sm onClick={()=>setShowCatMgr(true)}>🎨 Categories</Btn>
           {sel.length>0&&!discMode&&<Btn v='warn' sm onClick={()=>setDiscMode(true)}>% Discount</Btn>}
           {discMode&&sel.length>0&&<><input type="number" value={discPct} onChange={e=>setDiscPct(+e.target.value)} style={{width:55,padding:'4px 6px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/><Btn v='warn' sm onClick={applyDisc}>Apply</Btn><Btn v='danger' sm onClick={removeDisc}>Remove</Btn><Btn v='outline' sm onClick={()=>{setDiscMode(false);setSel([]);}}>Cancel</Btn></>}
-          {sel.length>0&&<Btn v='danger' sm onClick={()=>setConf({msg:`Delete ${sel.length} product(s)?`,yes:doDelete})}>🗑️ Delete ({sel.length})</Btn>}
+          {sel.length>0&&<Btn v='danger' sm disabled={delBusy} onClick={()=>{
+            const im = deleteImpact();
+            let m = `Delete ${sel.length} product(s)?\n\n${im.names.join(', ')}`;
+            const notes = [];
+            if(im.units>0)    notes.push(`• ${im.units} unit(s) across ${im.nBatches} inventory batch(es) will be deleted with it.`);
+            if(im.nOrders>0)  notes.push(`• Appears in ${im.nOrders} customer order(s). That history is KEPT — the name and price stay on the order.`);
+            if(im.nSales>0)   notes.push(`• Appears in ${im.nSales} sales record(s). That history is KEPT too.`);
+            if(notes.length)  m += '\n\n' + notes.join('\n');
+            m += '\n\nThis cannot be undone.';
+            setConf({msg:m, yes:doDelete});
+          }}>🗑️ Delete ({sel.length})</Btn>}
         </div>
       </div>
       <div style={{display:'flex',gap:8,marginBottom:14}}>
@@ -2812,7 +2867,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
         </div>
         <div style={{flex:1,padding:20,minWidth:0,overflowX:'auto'}}>
           {tab==='dash'&&<DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes}/>}
-          {tab==='prods'&&<ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv}/>}
+          {tab==='prods'&&<ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/>}
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
