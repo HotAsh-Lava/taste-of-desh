@@ -302,26 +302,45 @@ function ComboInput({value,onChange,onPick,options,placeholder}) {
 
 function CatManageOverlay({cats,setCats,catColors,setCatColors,prods,onClose}) {
   const [nc,setNc]=useState({name:'',color:'#2196F3'});
-  function addCat(){
+  const [busy,setBusy]=useState(false);
+  // Categories now live in the `categories` table. Previously these edits only
+  // changed React state, so every rename or new colour vanished on refresh.
+  async function addCat(){
     if(!nc.name||cats.includes(nc.name)) return;
+    setBusy(true);
+    const { error } = await supabase.from('categories')
+      .insert({ name: nc.name, color: nc.color, sort_order: 100 });
+    setBusy(false);
+    if(error){ alert('Failed to add category: '+error.message); return; }
     setCats(p=>[...p,nc.name]);
     setCatColors(p=>({...p,[nc.name]:nc.color}));
     setNc({name:'',color:'#2196F3'});
   }
-  function delCat(name){
+  async function delCat(name){
     const inUse = prods.some(p=>p.cat===name);
     if(inUse){ alert(`Cannot delete "${name}" — products still use this category. Reassign or delete those products first.`); return; }
+    if(!window.confirm(`Delete the category "${name}"?`)) return;
+    setBusy(true);
+    const { error } = await supabase.from('categories').delete().eq('name', name);
+    setBusy(false);
+    if(error){ alert('Failed to delete category: '+error.message); return; }
     setCats(p=>p.filter(c=>c!==name));
     setCatColors(p=>{const n={...p}; delete n[name]; return n;});
+  }
+  async function updColor(name, color){
+    setCatColors(p=>({...p,[name]:color}));   // update the UI straight away
+    const { error } = await supabase.from('categories').update({ color }).eq('name', name);
+    if(error) alert('Failed to save colour: '+error.message);
   }
   return (
     <Overlay title="Manage Categories" onClose={onClose} width={460}>
       {cats.map(c=>(
         <div key={c} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 0',borderBottom:`1px solid ${G.brd}`}}>
-          <div style={{width:18,height:18,borderRadius:5,background:catColors[c]||'#999',flexShrink:0}}/>
+          <input type="color" value={catColors[c]||'#999999'} onChange={e=>updColor(c, e.target.value)}
+            title="Change colour" style={{width:26,height:26,padding:0,borderRadius:5,border:`1px solid ${G.brd}`,cursor:'pointer',flexShrink:0,background:'none'}}/>
           <div style={{flex:1,fontSize:13,fontWeight:'bold',color:G.dk}}>{c}</div>
           <div style={{fontSize:11,color:G.mut}}>{prods.filter(p=>p.cat===c).length} items</div>
-          <button onClick={()=>delCat(c)} style={{background:'none',border:'none',color:G.rd,cursor:'pointer',fontSize:15}}>🗑️</button>
+          <button onClick={()=>delCat(c)} disabled={busy} style={{background:'none',border:'none',color:G.rd,cursor:busy?'not-allowed':'pointer',fontSize:15}}>🗑️</button>
         </div>
       ))}
       {cats.length===0&&<div style={{color:G.mut,fontSize:12,padding:'10px 0'}}>No categories yet.</div>}
@@ -330,7 +349,7 @@ function CatManageOverlay({cats,setCats,catColors,setCatColors,prods,onClose}) {
         <div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
           <div style={{flex:1}}><FInput label="Name" value={nc.name} onChange={v=>setNc(p=>({...p,name:v}))}/></div>
           <div><div style={{fontSize:11,marginBottom:3,fontWeight:'600'}}>Color</div><input type="color" value={nc.color} onChange={e=>setNc(p=>({...p,color:e.target.value}))} style={{width:50,height:36,borderRadius:7,border:`1px solid ${G.brd}`,cursor:'pointer'}}/></div>
-          <Btn onClick={addCat}>Add</Btn>
+          <Btn onClick={addCat} disabled={busy}>Add</Btn>
         </div>
       </div>
     </Overlay>
@@ -574,6 +593,23 @@ function CartTab({cart,prods,rawTotal,discTotal,hasDsc,totalGW,courierFee,grandT
   );
 }
 
+// ==================== Supabase Storage upload helper ====================
+// Uploads a File to a public Storage bucket and returns its public URL.
+// This is what replaces storing base64 image data inside the database —
+// base64 made every product row enormous and slowed down every page load.
+async function uploadToBucket(bucket, file, folder='') {
+  if(!file) return '';
+  if(!file.type || !file.type.startsWith('image/')) throw new Error('Please choose an image file (JPG or PNG).');
+  if(file.size > 5*1024*1024) throw new Error('That image is larger than 5MB. Please choose a smaller one.');
+  const ext = ((file.name || '').split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g,'') || 'jpg';
+  const path = `${folder ? folder + '/' : ''}${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
+  const { error } = await supabase.storage.from(bucket)
+    .upload(path, file, { cacheControl:'3600', upsert:false, contentType:file.type });
+  if(error) throw new Error('Upload failed: ' + error.message);
+  const { data } = supabase.storage.from(bucket).getPublicUrl(path);
+  return data.publicUrl;
+}
+
 // Fetch the profiles row (role, full_name, etc.) for a logged-in user.
 // Used after every successful auth action so `auth.user.role` is always fresh.
 async function fetchProfile(userId) {
@@ -626,7 +662,7 @@ function fromDbSale(row, items) {
   return {
     id: row.id, seq: row.seq, date: row.date, type: row.type, oid: row.order_id,
     cname: row.customer_name, mob: row.mobile, addr: row.address,
-    items: items.map(it => ({ name: it.name, qty: it.qty, up: it.unit_price, tp: it.total_price })),
+    items: items.map(it => ({ pid: it.product_id || null, name: it.name, qty: it.qty, up: it.unit_price, tp: it.total_price })),
     sub: row.subtotal, disc: row.discount, discTotal: row.discount_total,
     courier: row.courier_fee, grand: row.grand_total,
   };
@@ -849,21 +885,38 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   const [sec,setSec]=useState('main');
   const [na,setNa] = useState({name:'',mob:'',addr:''});
   const stC = {pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd},completed:{bg:G.gl,c:G.gd}};
-  function addAddr(){
-  if(!na.name||!na.mob||!na.addr)return;
-  if(na.id){
-    setAddrs(p=>p.map(a=>a.id===na.id?{...na}:a));
-  } else {
-    setAddrs(p=>[...p,{id:nid(p),...na}]);
+  const [addrBusy,setAddrBusy]=useState(false);
+  // Addresses now persist in the `addresses` table. They used to live only in
+  // React state, so every customer re-typed their address on every single order.
+  async function addAddr(){
+    if(!na.name||!na.mob||!na.addr) return;
+    if(!auth.user?.id){ alert('Please log in first.'); return; }
+    setAddrBusy(true);
+    try{
+      if(na.id){
+        const { error } = await supabase.from('addresses')
+          .update({ name: na.name, mobile: na.mob, address: na.addr })
+          .eq('id', na.id);
+        if(error){ alert('Failed to update address: '+error.message); return; }
+        setAddrs(p=>p.map(a=>a.id===na.id?{...na}:a));
+      } else {
+        const { data, error } = await supabase.from('addresses')
+          .insert({ customer_id: auth.user.id, name: na.name, mobile: na.mob, address: na.addr })
+          .select().single();
+        if(error){ alert('Failed to save address: '+error.message); return; }
+        setAddrs(p=>[...p,{ id:data.id, name:data.name, mob:data.mobile, addr:data.address }]);
+      }
+      setNa({name:'',mob:'',addr:''});
+      setSec('addrs');
+    } finally { setAddrBusy(false); }
   }
-  setNa({name:'',mob:'',addr:''});
-  setSec('addrs');
-}
-function editAddr(a){ setNa(a); setSec('addAddr'); }
-function deleteAddr(id){
-  if(!window.confirm('Delete this address?'))return;
-  setAddrs(p=>p.filter(a=>a.id!==id));
-}
+  function editAddr(a){ setNa(a); setSec('addAddr'); }
+  async function deleteAddr(id){
+    if(!window.confirm('Delete this address?')) return;
+    const { error } = await supabase.from('addresses').delete().eq('id', id);
+    if(error){ alert('Failed to delete address: '+error.message); return; }
+    setAddrs(p=>p.filter(a=>a.id!==id));
+  }
   async function doLogout(){
   await supabase.auth.signOut();
   setAuth({loggedIn:false,user:null});
@@ -962,7 +1015,7 @@ function deleteAddr(id){
             <div style={{fontSize:11,color:G.tx,marginBottom:3,fontWeight:'600'}}>{t('address')}<span style={{color:G.rd}}> *</span></div>
             <textarea value={na.addr} onChange={e=>setNa(p=>({...p,addr:e.target.value}))} style={{width:'100%',padding:'8px 11px',borderRadius:8,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box',minHeight:70,resize:'vertical'}}/>
           </div>
-          <Btn onClick={addAddr} style={{width:'100%',justifyContent:'center'}}>{na.id?'Save Changes':t('saveAddress')}</Btn>
+          <Btn onClick={addAddr} disabled={addrBusy} style={{width:'100%',justifyContent:'center'}}>{addrBusy?'Saving…':(na.id?'Save Changes':t('saveAddress'))}</Btn>
         </div>
       )}
       {sec==='lang'&&(
@@ -1145,6 +1198,19 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
       setInfo(p=>({...p,name:auth.user.name||'',mob:auth.user.mobile||''}));
     }
   },[auth.loggedIn]);
+  // Load this customer's saved addresses. RLS makes sure they only ever
+  // see their own rows, so no filtering is needed beyond the account id.
+  useEffect(()=>{
+    async function loadAddrs(){
+      if(!auth.loggedIn || !auth.user?.id){ setAddrs([]); return; }
+      const { data, error } = await supabase.from('addresses')
+        .select('*').eq('customer_id', auth.user.id).order('id');
+      if(error){ console.error('loadAddresses error:', error.message); return; }
+      setAddrs((data||[]).map(r=>({ id:r.id, name:r.name, mob:r.mobile, addr:r.address })));
+    }
+    loadAddrs();
+  },[auth.loggedIn, auth.user?.id]);
+
   // Fix 3: if a logged-out customer taps checkout, send them to the login
   // screen, then bounce them straight back into checkout once they're in.
   function requireLogin(){ setPendingCheckout(true); setTab('profile'); }
@@ -1156,83 +1222,58 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
     }
   },[pendingCheckout, auth.loggedIn]);
 
-  // STAGE 5: checkout actually writes to Supabase.
-  // Uploads the payment screenshot to Storage, then inserts the order + its line items.
+  // STAGE 5 + atomic stock: the whole order goes through one database function.
+  // place_order() checks stock, creates the order and its items, and decrements
+  // stock — all inside ONE transaction. That's what stops two customers from both
+  // buying the last item at the same moment. A check done in the browser can't do
+  // this: anyone can edit the numbers in DevTools, and two tabs can race each other.
   async function placeOrder(method, proofFile){
     if(placing) return;
     if(!auth.loggedIn || !auth.user?.id){ alert('Please log in before placing an order.'); return; }
     if(cart.length===0){ alert('Your cart is empty.'); return; }
     setPlacing(true);
     try {
-      // 1. Re-check stock against the database right now — the browser copy may be stale,
-      //    and someone else may have bought the last one while this cart sat open.
-      const { data: freshProds, error: stockErr } = await supabase
-        .from('products').select('id, name, stock').in('id', cart.map(i=>i.id));
-      if(stockErr) throw new Error('Could not verify stock: '+stockErr.message);
-      const short = cart.filter(i=>{
-        const fp = freshProds.find(p=>p.id===i.id);
-        return !fp || fp.stock < i.qty;
-      });
-      if(short.length){
-        const fp = freshProds.find(p=>p.id===short[0].id);
-        alert(`Sorry — "${short[0].name}" only has ${fp?fp.stock:0} left in stock. Please adjust your cart.`);
-        if(reloadProducts) await reloadProducts();
-        setCO(null); setTab('cart');
-        setPlacing(false);
-        return;
-      }
-
-      // 2. Upload the payment screenshot to Storage.
+      // 1. Upload the payment screenshot to Storage.
       let proofUrl = '';
       if(proofFile){
-        const ext = (proofFile.name.split('.').pop() || 'jpg').toLowerCase();
-        const path = `${auth.user.id}/${Date.now()}.${ext}`;
-        const { error: upErr } = await supabase.storage
-          .from('payment-proofs')
-          .upload(path, proofFile, { cacheControl:'3600', upsert:false, contentType: proofFile.type });
-        if(upErr) throw new Error('Payment proof upload failed: '+upErr.message);
-        const { data: pub } = supabase.storage.from('payment-proofs').getPublicUrl(path);
-        proofUrl = pub.publicUrl;
+        proofUrl = await uploadToBucket('payment-proofs', proofFile, auth.user.id);
       }
 
-      // 3. Insert the order. IDs must be globally unique — we can't count existing
-      //    orders any more, because RLS means we can only see our own.
+      // 2. One atomic call. If stock ran out, the database refuses and nothing is written.
       const orderId = `ORD${Date.now().toString(36).toUpperCase()}`;
-      const { error: ordErr } = await supabase.from('orders').insert({
-        id: orderId,
-        customer_id: auth.user.id,
-        date: bjDate(),
-        time: bjTime(),
-        customer_name: info.name,
-        mobile: info.mob,
-        address: info.addr,
-        status: 'pending',
-        tracking: [],
-        paid: true,
-        notes: '',
-        discount_total: discTotal,
-        customer_courier_fee: courierFee,
-        payment_proof_url: proofUrl,
-        payment_method: method || 'alipay',
+      const { error } = await supabase.rpc('place_order', {
+        p_order_id:   orderId,
+        p_date:       bjDate(),
+        p_time:       bjTime(),
+        p_name:       info.name,
+        p_mobile:     info.mob,
+        p_address:    info.addr,
+        p_items:      cart.map(i=>({
+                        product_id:   i.id,
+                        name:         i.name,
+                        qty:          i.qty,
+                        unit_price:   ep(i),
+                        gross_weight: i.gw,
+                        discount:     i.disc || 0,
+                      })),
+        p_disc_total: discTotal,
+        p_courier:    courierFee,
+        p_proof_url:  proofUrl,
+        p_method:     method || 'alipay',
       });
-      if(ordErr) throw new Error('Could not save your order: '+ordErr.message);
+      if(error) throw new Error(error.message);
 
-      // 4. Insert the line items.
-      const { error: itErr } = await supabase.from('order_items').insert(
-        cart.map(i=>({
-          order_id: orderId, product_id: i.id, name: i.name,
-          qty: i.qty, unit_price: ep(i), gross_weight: i.gw, discount: i.disc || 0,
-        }))
-      );
-      if(itErr) throw new Error('Order saved but items failed: '+itErr.message);
-
-      // 5. Success — clear the cart, refresh My Orders, show the thank-you screen.
+      // 3. Success — clear the cart, refresh orders and the now-reduced stock.
       setCart([]);
-      if(onOrdersChanged) await onOrdersChanged();
+      if(onOrdersChanged)  await onOrdersChanged();
+      if(reloadProducts)   await reloadProducts();
       setCO('done');
     } catch(err){
       console.error('placeOrder error:', err);
       alert(err.message || 'Something went wrong placing your order. Please try again.');
+      // Pull fresh stock so the cart reflects what's actually left.
+      if(reloadProducts) await reloadProducts();
+      setCO(null); setTab('cart');
     } finally {
       setPlacing(false);
     }
@@ -1287,18 +1328,21 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
   const totalRev=sales.reduce((s,o)=>s+o.grand,0);
   const pendingN=orders.filter(o=>o.status==='pending').length;
   const [capt,setCapt]=useState('');
-  function handleSlideImg(e){
+  const [upBusy,setUpBusy]=useState('');
+  // Slideshow images and QR codes go to Storage too — site_settings used to hold
+  // base64 blobs, which every visitor downloaded on every page load.
+  async function handleSlideImg(e){
     const f=e.target.files[0]; if(!f) return;
-    const rd=new FileReader();
-    rd.onload=async ()=>{
-      const next=[...customSlides,{id:nid(customSlides),img:rd.result,caption:capt}];
+    setUpBusy('slide');
+    try{
+      const url = await uploadToBucket('site-images', f, 'slides');
+      const next=[...customSlides,{id:nid(customSlides),img:url,caption:capt}];
       const { error } = await supabase.from('site_settings').update({custom_slides:next}).eq('id',true);
-      if(error){alert('Failed to save slide: '+error.message);return;}
+      if(error) throw new Error('Failed to save slide: '+error.message);
       setCustomSlides(next);
       setCapt('');
-    };
-    rd.readAsDataURL(f);
-    e.target.value='';
+    }catch(err){ alert(err.message); }
+    finally{ setUpBusy(''); e.target.value=''; }
   }
   async function delSlide(id){
     const next=customSlides.filter(s=>s.id!==id);
@@ -1306,17 +1350,17 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
     if(error){alert('Failed to delete slide: '+error.message);return;}
     setCustomSlides(next);
   }
-  function handleQRImg(method,e){
+  async function handleQRImg(method,e){
     const f=e.target.files[0]; if(!f) return;
-    const rd=new FileReader();
-    rd.onload=async ()=>{
-      const next={...qrCodes,[method]:rd.result};
+    setUpBusy(method);
+    try{
+      const url = await uploadToBucket('site-images', f, 'qr');
+      const next={...qrCodes,[method]:url};
       const { error } = await supabase.from('site_settings').update({qr_codes:next}).eq('id',true);
-      if(error){alert('Failed to save QR code: '+error.message);return;}
+      if(error) throw new Error('Failed to save QR code: '+error.message);
       setQrCodes(next);
-    };
-    rd.readAsDataURL(f);
-    e.target.value='';
+    }catch(err){ alert(err.message); }
+    finally{ setUpBusy(''); e.target.value=''; }
   }
   async function delQR(method){
     const next={...qrCodes,[method]:''};
@@ -1324,12 +1368,58 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
     if(error){alert('Failed to remove QR: '+error.message);return;}
     setQrCodes(next);
   }
-  const monthly=[
-    {m:'Jan',sales:850,cost:520,profit:210,courier:120},{m:'Feb',sales:1200,cost:740,profit:280,courier:180},
-    {m:'Mar',sales:980,cost:600,profit:240,courier:140},{m:'Apr',sales:1450,cost:880,profit:360,courier:210},
-    {m:'May',sales:1100,cost:670,profit:295,courier:165},{m:'Jun',sales:Math.max(Math.round(totalRev),760),cost:460,profit:185,courier:115},
-  ];
-  const topProds=[...prods].sort((a,b)=>b.sp-a.sp).slice(0,5);
+  // Real numbers, computed from the sales table — the last 6 months including
+  // this one. This used to be a hardcoded array of made-up figures.
+  const monthly = useMemo(()=>{
+    const now = new Date();
+    const buckets = [];
+    for(let k=5;k>=0;k--){
+      const d = new Date(now.getFullYear(), now.getMonth()-k, 1);
+      buckets.push({
+        key: `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`,
+        m: d.toLocaleString('en',{month:'short'}),
+        sales:0, cost:0, profit:0, courier:0,
+      });
+    }
+    const byKey = {};
+    buckets.forEach(b=>{ byKey[b.key]=b; });
+    sales.forEach(sl=>{
+      if(!sl.date) return;
+      const b = byKey[String(sl.date).slice(0,7)];   // 'YYYY-MM-DD' -> 'YYYY-MM'
+      if(!b) return;
+      const rev  = +sl.grand   || 0;
+      const cour = +sl.courier || 0;
+      // Cost of goods sold: match each line item back to its product's cost price.
+      const cost = (sl.items||[]).reduce((sum,it)=>{
+        const pr = prods.find(x=>x.name===it.name);
+        return sum + ((pr && pr.cp) ? pr.cp * it.qty : 0);
+      },0);
+      b.sales   += rev;
+      b.cost    += cost;
+      b.courier += cour;
+      b.profit  += rev - cost - cour;
+    });
+    return buckets.map(b=>({
+      m: b.m,
+      sales:   +b.sales.toFixed(2),
+      cost:    +b.cost.toFixed(2),
+      profit:  +b.profit.toFixed(2),
+      courier: +b.courier.toFixed(2),
+    }));
+  },[sales,prods]);
+
+  // Top products by units actually sold, not by list price.
+  const topProds = useMemo(()=>{
+    const sold = {};
+    sales.forEach(sl=>(sl.items||[]).forEach(it=>{
+      sold[it.name] = (sold[it.name]||0) + (+it.qty||0);
+    }));
+    return [...prods]
+      .map(pr=>({...pr, sold: sold[pr.name]||0}))
+      .sort((a,b)=> (b.sold-a.sold) || (b.sp-a.sp))
+      .slice(0,5);
+  },[prods,sales]);
+  const noSales = sales.length===0;
   return(
     <div>
       <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:16}}>📊 Dashboard</div>
@@ -1345,7 +1435,10 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
         <div style={{fontSize:11,color:G.mut,marginBottom:12}}>Upload pictures to feature them in the rotating slideshow at the top of the customer Home page.</div>
         <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'flex-end',marginBottom:14}}>
           <div style={{flex:1,minWidth:160}}><FInput label="Caption (optional)" value={capt} onChange={setCapt}/></div>
-          <div style={{marginBottom:10}}><input type="file" accept="image/*" onChange={handleSlideImg} style={{fontSize:12}}/></div>
+          <div style={{marginBottom:10}}>
+            <input type="file" accept="image/*" onChange={handleSlideImg} disabled={upBusy==='slide'} style={{fontSize:12}}/>
+            {upBusy==='slide'&&<div style={{fontSize:11,color:G.bd,fontWeight:'bold',marginTop:4}}>⏳ Uploading…</div>}
+          </div>
         </div>
         {customSlides.length===0
           ? <div style={{color:G.mut,fontSize:12}}>No custom slides yet.</div>
@@ -1353,7 +1446,7 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
             <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
               {customSlides.map(s=>(
                 <div key={s.id} style={{position:'relative',width:140}}>
-                  <img src={s.img} style={{width:140,height:90,objectFit:'cover',borderRadius:9,border:`1px solid ${G.brd}`,display:'block'}}/>
+                  <img src={s.img} alt={s.caption||'Slide'} style={{width:140,height:90,objectFit:'contain',borderRadius:9,border:`1px solid ${G.brd}`,display:'block',background:G.bg}}/>
                   {s.caption&&<div style={{fontSize:10,color:G.tx,marginTop:4,maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{s.caption}</div>}
                   <button onClick={()=>delSlide(s.id)} style={{position:'absolute',top:4,right:4,background:'rgba(0,0,0,0.55)',color:'#fff',border:'none',borderRadius:'50%',width:22,height:22,cursor:'pointer',fontSize:12}}>✕</button>
                 </div>
@@ -1377,7 +1470,10 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
               ) : (
                 <div style={{width:140,height:140,margin:'0 auto',borderRadius:9,border:`2px dashed ${G.brd}`,display:'flex',alignItems:'center',justifyContent:'center',color:G.mut,fontSize:11,background:G.bg}}>No QR yet</div>
               )}
-              <div style={{marginTop:9}}><input type="file" accept="image/*" onChange={e=>handleQRImg(m,e)} style={{fontSize:11}}/></div>
+              <div style={{marginTop:9}}>
+                <input type="file" accept="image/*" onChange={e=>handleQRImg(m,e)} disabled={upBusy===m} style={{fontSize:11}}/>
+                {upBusy===m&&<div style={{fontSize:11,color:G.bd,fontWeight:'bold',marginTop:4}}>⏳ Uploading…</div>}
+              </div>
             </div>
           ))}
         </div>
@@ -1389,7 +1485,9 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
         <Stat icon="⚠️" label="Low Stock Items" value={lowStock.length} color={G.rd}/>
       </div>
       <Card style={{marginBottom:18}}>
-        <div style={{fontWeight:'bold',fontSize:14,marginBottom:14,color:G.dk}}>📈 Monthly Performance (RMB)</div>
+        <div style={{fontWeight:'bold',fontSize:14,marginBottom:4,color:G.dk}}>📈 Monthly Performance (RMB)</div>
+        <div style={{fontSize:11,color:G.mut,marginBottom:12}}>Last 6 months, from your Sales List. Cost is calculated from each product's cost price.</div>
+        {noSales&&<div style={{fontSize:12,color:G.yd,background:G.goldl,borderRadius:8,padding:10,marginBottom:12}}>No sales recorded yet — this chart will fill in as orders are completed.</div>}
         <ResponsiveContainer width="100%" height={220}>
           <BarChart data={monthly}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="m" fontSize={11}/><YAxis fontSize={11}/><Tooltip/><Legend/>
             <Bar dataKey="sales" name="Sales" fill={G.gm}/><Bar dataKey="cost" name="Cost" fill="#EF9A9A"/><Bar dataKey="profit" name="Profit" fill={G.gold}/>
@@ -1410,12 +1508,13 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
           <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
             <thead><tr style={{background:G.gd,color:G.w}}>
               <th style={{padding:'8px 10px',textAlign:'left'}}>#</th><th style={{padding:'8px 10px',textAlign:'left'}}>Product</th>
-              <th style={{padding:'8px 10px',textAlign:'center'}}>Category</th><th style={{padding:'8px 10px',textAlign:'center'}}>Price</th><th style={{padding:'8px 10px',textAlign:'center'}}>Stock</th>
+              <th style={{padding:'8px 10px',textAlign:'center'}}>Category</th><th style={{padding:'8px 10px',textAlign:'center'}}>Units Sold</th><th style={{padding:'8px 10px',textAlign:'center'}}>Price</th><th style={{padding:'8px 10px',textAlign:'center'}}>Stock</th>
             </tr></thead>
             <tbody>{topProds.map((p,i)=>(
               <tr key={p.id} style={{background:i%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
                 <td style={{padding:'7px 10px',fontWeight:'bold'}}>{i+1}</td><td style={{padding:'7px 10px'}}>{p.name}</td>
                 <td style={{padding:'7px 10px',textAlign:'center'}}><CatChip cat={p.cat} catColors={catColors}/></td>
+                <td style={{padding:'7px 10px',textAlign:'center',fontWeight:'bold',color:p.sold>0?G.gd:G.mut}}>{p.sold}</td>
                 <td style={{padding:'7px 10px',textAlign:'center'}}>¥{p.sp}</td>
                 <td style={{padding:'7px 10px',textAlign:'center'}}><span style={{...stStyle(p.stock),padding:'2px 8px',borderRadius:5,display:'inline-block'}}>{p.stock}</span></td>
               </tr>
@@ -1446,21 +1545,32 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
   const [discPct,setDiscPct]=useState(10);
   const [conf,setConf]=useState(null);
   const [np,setNp]=useState({name:'',upc:'',cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:0,disc:0,img:''});
-  const synced=useMemo(()=>prods.map(p=>{const tot=inv.filter(i=>i.name===p.name).reduce((s,i)=>s+i.qty,0);return tot>0?{...p,stock:tot}:p;}),[prods,inv]);
+  // products.stock is the single source of truth now. This used to override the
+  // displayed stock with the sum of inventory batches, which disagreed with reality
+  // as soon as a customer bought something.
+  const synced=prods;
   const list=useMemo(()=>{
     let r=synced;
     if(q){const lq=q.toLowerCase();r=r.filter(p=>p.name.toLowerCase().includes(lq)||(p.upc||'').includes(lq));}
     return [...r].sort((a,b)=>{const ca=cats.indexOf(a.cat),cb=cats.indexOf(b.cat); if(ca!==cb) return ca-cb; return a.name.localeCompare(b.name);});
   },[synced,q,cats]);
-  function handleImg(e){
+  const [imgBusy,setImgBusy]=useState(false);
+  // Product pictures now go to Supabase Storage and we keep only the URL.
+  // They used to be stored as base64 inside products.image_url, which meant
+  // every single product fetch dragged the full image bytes across the network.
+  async function handleImg(e){
     const f=e.target.files[0]; if(!f) return;
-    const rd=new FileReader();
-    rd.onload=()=>setNp(p=>({...p,img:rd.result}));
-    rd.readAsDataURL(f);
+    setImgBusy(true);
+    try{
+      const url = await uploadToBucket('product-images', f);
+      setNp(p=>({...p,img:url}));
+    }catch(err){ alert(err.message); }
+    finally{ setImgBusy(false); e.target.value=''; }
   }
   async function addProd(){
     if(!np.name||!np.cat||!np.sp||!np.pw||!np.gw){alert('Name, Category, Packed Weight, Gross Weight and Selling Price are required');return;}
     if(!np.img){alert('Please upload a product picture');return;}
+    if(imgBusy){alert('Please wait for the image to finish uploading.');return;}
     const draft={...np,pw:+np.pw,gw:+np.gw,sp:+np.sp,cp:+np.cp||0,stock:+np.stock||0,disc:+np.disc||0,offer:+np.disc>0,bs:false,isNew:true};
     const { data, error } = await supabase.from('products').insert(toDbProduct(draft)).select().single();
     if(error){alert('Failed to save product: '+error.message);return;}
@@ -1514,7 +1624,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
             <tr key={p.id} style={{background:isS?G.gl:i%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
               <td style={{padding:'7px',textAlign:'center'}}><input type="checkbox" checked={isS} onChange={()=>tog(p.id)}/></td>
               <td style={{padding:'7px',textAlign:'center',color:G.mut}}>{p.id}</td>
-              <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} style={{width:34,height:34,objectFit:'cover',borderRadius:6}}/>:<span style={{fontSize:22}}>{ICONS[p.cat]||'📦'}</span>}</td>
+              <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} alt={p.name} style={{width:34,height:34,objectFit:'contain',borderRadius:6,background:G.bg}}/>:<span style={{fontSize:22}}>{ICONS[p.cat]||'📦'}</span>}</td>
               <td style={{padding:'7px'}}><div style={{fontWeight:'bold'}}>{p.name}</div>{p.offer&&<span style={{background:'#FFCDD2',color:'#B71C1C',borderRadius:4,padding:'1px 5px',fontSize:10,fontWeight:'bold'}}>On Offer</span>}</td>
               <td style={{padding:'7px',textAlign:'center',color:G.mut,fontSize:11}}>{p.upc||'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}><CatChip cat={p.cat} catColors={catColors}/></td>
@@ -1546,8 +1656,9 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv}) {
           </div>
           <div style={{marginTop:6,marginBottom:6}}>
             <div style={{fontSize:11,fontWeight:'600',marginBottom:5}}>Product Picture <span style={{color:'#B71C1C'}}>*</span> <span style={{color:G.mut,fontWeight:'normal'}}>(required)</span></div>
-            <input type="file" accept="image/*" onChange={handleImg} style={{fontSize:12}}/>
-            {np.img&&<div style={{marginTop:8}}><img src={np.img} style={{width:74,height:74,objectFit:'cover',borderRadius:8,border:`1px solid ${G.brd}`}}/></div>}
+            <input type="file" accept="image/*" onChange={handleImg} disabled={imgBusy} style={{fontSize:12}}/>
+            {imgBusy&&<div style={{fontSize:11,color:G.bd,marginTop:6,fontWeight:'bold'}}>⏳ Uploading image…</div>}
+            {np.img&&!imgBusy&&<div style={{marginTop:8,width:74,height:74,borderRadius:8,border:`1px solid ${G.brd}`,background:G.bg,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}><img src={np.img} alt="Product preview" style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain'}}/></div>}
           </div>
           <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}}><Btn v='outline' onClick={()=>setShowAdd(false)}>Cancel</Btn><Btn onClick={addProd}>Save Product</Btn></div>
         </Overlay>
@@ -1585,7 +1696,11 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
     const item=fromDbInv(data);
     setInv(p=>[...p,item]);
     if(matchedProd){
-      const newStock=[...inv,item].filter(i=>i.name===draft.name).reduce((s,i)=>s+i.qty,0);
+      // INCREMENT, don't recompute from inventory batches.
+      // products.stock is now the authoritative counter: adding inventory raises it,
+      // a customer order lowers it. Recomputing from batches used to silently wipe out
+      // every sale that had happened since the last restock.
+      const newStock=(matchedProd.stock||0)+item.qty;
       const { error: upErr } = await supabase.from('products').update({stock:newStock}).eq('id',matchedProd.id);
       if(!upErr) setProds(p=>p.map(x=>x.id===matchedProd.id?{...x,stock:newStock}:x));
     }
@@ -1614,15 +1729,15 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
       const { data: newRows, error: insErr } = await supabase.from('inventory').insert(toInsert).select();
       if(insErr){alert('Failed to restore: '+insErr.message);return;}
       const restored=(newRows||[]).map(fromDbInv);
-      const nextInv=[...inv,...restored];
-      setInv(nextInv);
+      setInv([...inv,...restored]);
 
-      // recompute product stock from the full inventory for every affected product
-      const names=[...new Set(rows.map(r=>r.name))];
-      for(const name of names){
+      // Add the restored quantity back onto each product's stock counter.
+      const byName={};
+      rows.forEach(r=>{ byName[r.name]=(byName[r.name]||0)+r.qty; });
+      for(const name of Object.keys(byName)){
         const prod=prods.find(x=>x.name===name);
         if(!prod) continue;
-        const newStock=nextInv.filter(i=>i.name===name).reduce((sum,i)=>sum+i.qty,0);
+        const newStock=(prod.stock||0)+byName[name];
         const { error: upErr } = await supabase.from('products').update({stock:newStock}).eq('id',prod.id);
         if(!upErr) setProds(p=>p.map(x=>x.id===prod.id?{...x,stock:newStock}:x));
       }
@@ -1819,382 +1934,76 @@ function PITab({prods,pos,setPOs,catColors}) {
   const grand=totC+totS+(+hdr.bdc||0)+chnLC;
 
   async function save(){
-    const fi=items.filter(i=>i.name&&i.qty);if(!fi.length){alert('Add at least one product');return;}
-    const existing = curId ? pos.find(p=>p.id===curId) : null;
-    const draft={poNum,date:existing?existing.date:bjDate(),time:existing?existing.time:bjTime(),vendor,hdr:{...hdr},items:fi,totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand};
-    if(curId){
-      const { error } = await supabase.from('purchase_orders').update(toDbPO(draft)).eq('id',curId);
-      if(error){alert('Failed to save purchase order: '+error.message);return;}
-      setPOs(p=>p.map(x=>x.id===curId?{...draft,id:curId}:x));
-    } else {
-      const { data, error } = await supabase.from('purchase_orders').insert(toDbPO(draft)).select().single();
-      if(error){alert('Failed to save purchase order: '+error.message);return;}
-      const saved=fromDbPO(data);
-      setPOs(p=>[...p,saved]); setCurId(saved.id);
-    }
-    alert('Purchase order saved!');
-  }
-  function newOrd(){setHdr({cr:'',sr:'',bdc:'',cnc:''});setVendor('');setItems([blankPIItem()]);setCurId(null);}
-  async function deleteOrder(){
-    if(!curId){alert('Load or save an order first, or click Load on one below to delete it.');return;}
-    const { error } = await supabase.from('purchase_orders').delete().eq('id',curId);
-    if(error){alert('Failed to delete: '+error.message);return;}
-    const remaining=pos.filter(p=>p.id!==curId).sort((a,b)=>a.poNum-b.poNum).map((p,i)=>({...p,poNum:i+1}));
-    await Promise.all(remaining.map(p=>supabase.from('purchase_orders').update({po_num:p.poNum}).eq('id',p.id)));
-    setPOs(remaining);
-    newOrd();
-  }
-  function printOrder(){
-    const html=buildPOHTML({poNum,date:bjDate(),time:bjTime(),vendor,hdr,items:items.filter(i=>i.name&&i.qty),totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand});
-    openPrintWindow(html);
-  }
-  function loadPO(po){
-    setCurId(po.id); setVendor(po.vendor||''); setHdr(po.hdr||{cr:'',sr:'',bdc:'',cnc:''});
-    setItems([...(po.items||[]).map(it=>({...it})), blankPIItem()]);
-  }
-
-  return(
-    <div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
-        <div style={{fontSize:19,fontWeight:'bold',color:G.dk}}>🧾 Purchase Invoice</div>
-        <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-          <Btn onClick={newOrd}>+ New</Btn>
-          <Btn v='info' onClick={save}>💾 Save</Btn>
-          <Btn v='outline' onClick={printOrder}>🖨️ Print PDF</Btn>
-          <Btn v='danger' onClick={deleteOrder}>🗑️ Delete</Btn>
-        </div>
-      </div>
-      <Card style={{marginBottom:14}}>
-        <div style={{fontSize:12,color:G.mut,marginBottom:10,fontWeight:'bold'}}>PO# {poNum} · Date: {bjDate()} · Time: {bjTime()}</div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(175px,1fr))',gap:10}}>
-          <FInput label="Vendor" value={vendor} onChange={setVendor}/>
-          <FInput label="Costing RMB Rate" value={hdr.cr} onChange={v=>setHdr(p=>({...p,cr:v}))} type="number"/>
-          <FInput label="Selling RMB Rate" value={hdr.sr} onChange={v=>setHdr(p=>({...p,sr:v}))} type="number"/>
-          <FInput label="BD Courier (BDT)" value={hdr.bdc} onChange={v=>setHdr(p=>({...p,bdc:v}))} type="number"/>
-          <FInput label="China Courier (RMB)" value={hdr.cnc} onChange={v=>setHdr(p=>({...p,cnc:v}))} type="number"/>
-        </div>
-      </Card>
-      <Card style={{marginBottom:14,overflowX:'auto'}}>
-        <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:1050}}>
-          <thead><tr style={{background:G.gd,color:G.w}}>
-            {['Product Name','Qty','Packed(g)','Unit Cost(BDT)','Total Cost(BDT)','Category','Gross(KG)','Unit Ship(BDT)','Total Ship(BDT)','Expiry','Per Pkt(RMB)','Set Price(RMB)','UPC','✕'].map(h=>(
-              <th key={h} style={{padding:'7px 5px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
-            ))}
-          </tr></thead>
-          <tbody>{items.map((it,idx)=>(
-            <tr key={idx} style={{background:idx%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
-              <td style={{padding:'5px',minWidth:155}}><ComboInput value={it.name} onChange={v=>updItem(idx,'name',v)} onPick={p=>selectItem(idx,p)} options={prods} placeholder="Type to search product..."/></td>
-              <td style={{padding:'5px'}}><input type="number" value={it.qty} onChange={e=>updItem(idx,'qty',e.target.value)} style={{width:50,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11,textAlign:'center'}}/></td>
-              <td style={{padding:'5px',textAlign:'center'}}>{it.pw||'—'}</td>
-              <td style={{padding:'5px'}}><input type="number" value={it.uc} onChange={e=>updItem(idx,'uc',e.target.value)} style={{width:65,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
-              <td style={{padding:'5px',textAlign:'center',fontWeight:'bold'}}>{it.tc||0}</td>
-              <td style={{padding:'5px',textAlign:'center'}}>{it.cat?<CatChip cat={it.cat} catColors={catColors}/>:<span style={{fontSize:10,color:G.mut}}>—</span>}</td>
-              <td style={{padding:'5px',textAlign:'center'}}>{it.gw}</td>
-              <td style={{padding:'5px'}}><input type="number" value={it.us} onChange={e=>updItem(idx,'us',e.target.value)} style={{width:65,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
-              <td style={{padding:'5px',textAlign:'center',fontWeight:'bold'}}>{it.ts2||0}</td>
-              <td style={{padding:'5px'}}><input type="date" value={it.exp} onChange={e=>updItem(idx,'exp',e.target.value)} style={{padding:'3px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:10}}/></td>
-              <td style={{padding:'5px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{it.ppc?`¥${it.ppc}`:'—'}</td>
-              <td style={{padding:'5px'}}><input type="number" value={it.sp} onChange={e=>updItem(idx,'sp',e.target.value)} style={{width:60,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
-              <td style={{padding:'5px',textAlign:'center',fontSize:10}}>{it.upc}</td>
-              <td style={{padding:'5px',textAlign:'center'}}>{items.length>1&&<button onClick={()=>setItems(p=>p.filter((_,j)=>j!==idx))} style={{background:'none',border:'none',cursor:'pointer',color:'#B71C1C',fontSize:14}}>✕</button>}</td>
-            </tr>
-          ))}</tbody>
-        </table>
-        <div style={{marginTop:10}}><Btn sm onClick={()=>setItems(p=>[...p,blankPIItem()])}>+ Add Row</Btn></div>
-        <div style={{background:G.bg,borderRadius:8,padding:12,marginTop:14,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,fontSize:12}}>
-          <div><strong>Total Qty:</strong> {totQty} PCS</div><div><strong>Total Cost:</strong> ৳{totC.toFixed(2)}</div>
-          <div><strong>Total Shipping:</strong> ৳{totS.toFixed(2)}</div><div><strong>BD Courier:</strong> ৳{(+hdr.bdc||0).toFixed(2)}</div>
-          <div><strong>China Courier:</strong> ৳{chnLC.toFixed(2)}</div>
-          <div style={{fontWeight:'bold',color:G.gd,fontSize:14}}><strong>Grand Total:</strong> ৳{grand.toFixed(2)}</div>
-        </div>
-      </Card>
-      {pos.length>0&&(
-        <Card>
-          <div style={{fontWeight:'bold',fontSize:13,marginBottom:10}}>Recent Purchase Orders</div>
-          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-            <thead><tr style={{background:G.gl}}><th style={{padding:'7px',textAlign:'left'}}>PO#</th><th style={{padding:'7px'}}>Date</th><th style={{padding:'7px'}}>Vendor</th><th style={{padding:'7px',textAlign:'center'}}>Grand Total</th><th style={{padding:'7px',textAlign:'center'}}>Action</th></tr></thead>
-            <tbody>{[...pos].sort((a,b)=>b.poNum-a.poNum).map(po=>(
-              <tr key={po.id} style={{borderBottom:`1px solid ${G.brd}`,background:curId===po.id?G.gl:'transparent'}}>
-                <td style={{padding:'7px',fontWeight:'bold'}}>{po.poNum}</td><td style={{padding:'7px'}}>{po.date}</td><td style={{padding:'7px'}}>{po.vendor||'—'}</td>
-                <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>৳{po.grand?.toFixed(2)}</td>
-                <td style={{padding:'7px',textAlign:'center'}}><Btn sm onClick={()=>loadPO(po)}>Load</Btn></td>
-              </tr>
-            ))}</tbody>
-          </table>
-        </Card>
-      )}
-    </div>
-  );
-}
-
-function PLTab({pos,setPOs,inv,setInv,catColors}) {
-  const [sel,setSel]=useState([]);
-  async function moveToInv(){
-    const toMv=[];
-    pos.forEach(po=>po.items.forEach((it,ii)=>{
-      const key=`${po.id}_${ii}`;
-      if(sel.includes(key) && !it.moved) toMv.push({...it,_poId:po.id,_idx:ii});
-    }));
-    if(!toMv.length){setSel([]);return;}
-    const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||''}));
-    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d,null))).select();
-    if(error){alert('Failed to move to inventory: '+error.message);return;}
-    const news=data.map(fromDbInv);
-    setInv(p=>[...p,...news]);
-    const updatedPOs=pos.map(po=>({...po,items:po.items.map((it,ii)=>sel.includes(`${po.id}_${ii}`)?{...it,moved:true}:it)}));
-    const affectedPOs=updatedPOs.filter(po=>po.items.some((it,ii)=>sel.includes(`${po.id}_${ii}`)));
-    await Promise.all(affectedPOs.map(po=>supabase.from('purchase_orders').update({items:po.items}).eq('id',po.id)));
-    setPOs(updatedPOs);
-    alert(`${news.length} items moved to Inventory!`);setSel([]);
-  }
-  return(
-    <div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
-        <div style={{fontSize:19,fontWeight:'bold',color:G.dk}}>📜 Purchase List</div>
-        {sel.length>0&&<Btn onClick={moveToInv}>📦 Move to Inventory ({sel.length})</Btn>}
-      </div>
-      {pos.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No purchase orders yet. Create one in Purchase Invoice.</div></Card>:
-        [...pos].sort((a,b)=>b.poNum-a.poNum).map(po=>{
-          const selectableKeys = po.items.map((it,i)=>!it.moved?`${po.id}_${i}`:null).filter(Boolean);
-          const allSelHere = selectableKeys.length>0 && selectableKeys.every(k=>sel.includes(k));
-          function toggleAllHere(){
-            if(allSelHere) setSel(p=>p.filter(x=>!selectableKeys.includes(x)));
-            else setSel(p=>[...new Set([...p,...selectableKeys])]);
-          }
-          return(
-          <Card key={po.id} style={{marginBottom:18}}>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(135px,1fr))',gap:10,background:G.gl,borderRadius:9,padding:'11px 15px',marginBottom:12}}>
-              {[['PO#',po.poNum],['Vendor',po.vendor||'—'],['Grand Total(BDT)',`৳${(po.grand||0).toFixed(2)}`],['Total Cost(BDT)',`৳${(po.totC||0).toFixed(2)}`],['Total Ship(BDT)',`৳${(po.totS||0).toFixed(2)}`],['BD Local Courier(BDT)',`৳${(po.bdLC||0).toFixed(2)}`],['China Local Courier(BDT)',`৳${(po.chnLC||0).toFixed(2)}`],['Costing RMB Rate',po.hdr?.cr||'—'],['Selling RMB Rate',po.hdr?.sr||'—'],['BD Courier(BDT)',po.hdr?.bdc||'—'],['China Courier(RMB)',po.hdr?.cnc||'—']].map(([l,v])=>(
-                <div key={l}><div style={{fontSize:10,color:G.mut,fontWeight:'bold'}}>{l}</div><div style={{fontSize:12,fontWeight:'bold',color:G.dk}}>{v}</div></div>
-              ))}
-            </div>
-            <div style={{fontSize:11,color:G.mut,marginBottom:8}}>{po.date} · {po.time}</div>
-            <div style={{overflowX:'auto'}}>
-              <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:760}}>
-                <thead><tr style={{background:G.gd,color:G.w}}>
-                  <th style={{padding:'7px 5px',textAlign:'center'}}>{selectableKeys.length>0?<input type="checkbox" checked={allSelHere} onChange={toggleAllHere}/>:'✓'}</th>
-                  {['SI.','Product Name','Category','Packed(g)','Qty','Gross(KG)','Unit Ship','Total Ship','Expiry','Per Pkt(RMB)','Set Price','UPC'].map(h=>(
-                    <th key={h} style={{padding:'7px 5px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
-                  ))}
-                </tr></thead>
-                <tbody>{po.items.map((it,i)=>{const key=`${po.id}_${i}`;return(
-                  <tr key={key} style={{background:it.moved?'#F1F8F2':i%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.moved
-                      ?<span title="Already moved to Inventory" style={{color:G.gm,fontSize:15}}>✅</span>
-                      :<input type="checkbox" checked={sel.includes(key)} onChange={()=>setSel(p=>p.includes(key)?p.filter(x=>x!==key):[...p,key])}/>
-                    }</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{i+1}</td>
-                    <td style={{padding:'6px',fontWeight:'bold'}}>{it.name}{it.moved&&<span style={{marginLeft:6,background:G.gl,color:G.gd,borderRadius:4,padding:'1px 6px',fontSize:9,fontWeight:'bold',whiteSpace:'nowrap'}}>✓ IN INVENTORY</span>}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.cat?<CatChip cat={it.cat} catColors={catColors}/>:'—'}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.pw}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.qty}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.gw}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.us}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.ts2}</td>
-                    <td style={{padding:'6px',textAlign:'center',...expStyle(it.exp)}}>{it.exp}</td>
-                    <td style={{padding:'6px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{it.ppc?`¥${it.ppc}`:'—'}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.sp?`¥${it.sp}`:'—'}</td>
-                    <td style={{padding:'6px',fontSize:10,color:G.mut}}>{it.upc}</td>
-                  </tr>
-                );})}</tbody>
-              </table>
-            </div>
-          </Card>
-          );
-        })
-      }
-    </div>
-  );
-}
-
-function OOTab({orders,setOrders,sales,setSales}) {
-  const [conf,setConf]=useState(null);
-  const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
-  const stC={pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd}};
-  function upd(id,f,v){setOrders(p=>p.map(o=>o.id===id?{...o,[f]:v}:o));}
-  async function syncOrder(o){
-    const { error } = await supabase.from('orders').update({
-      customer_name:o.cname, mobile:o.mob, address:o.addr, status:o.status,
-      tracking:o.tracking, customer_courier_fee:o.custCourier, discount_total:o.discTotal,
-    }).eq('id',o.id);
-    if(error) console.error('syncOrder error:', error.message);
-  }
-  async function complete(o){
-    const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
-    const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
-    const cour=o.custCourier!=null?o.custCourier:cf(tgw);
-    const disc=o.discTotal||sub;const grand=disc+cour;
-    const seq=nextSeq(sales);
-    const draft={seq,date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,sub,disc:sub-disc,discTotal:disc,courier:cour,grand};
-    const lineItems=o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}));
-    const { data, error } = await supabase.from('sales').insert(toDbSale(draft)).select().single();
-    if(error){alert('Failed to complete order: '+error.message);return;}
-    const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:data.id,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
-    if(itErr){alert('Failed to save sale items: '+itErr.message);return;}
-    const { error: ordErr } = await supabase.from('orders').update({status:'completed'}).eq('id',o.id);
-    if(ordErr) console.error('Failed to sync completed status:', ordErr.message);
-    const sl={...draft,id:data.id,items:lineItems};
-    setSales(p=>[sl,...p]);setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed'}:x));setConf(null);
-  }
-  return(
-    <div>
-      {conf&&<ConfirmDlg msg={conf.msg} onYes={conf.yes} onNo={()=>setConf(null)}/>}
-      <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:4}}>🛒 Online Orders</div>
-      <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Active: {active.length} · Total: {orders.length}</div>
-      {active.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No active orders</div></Card>:active.map(o=>{
-        const sc=stC[o.status]||stC.pending;
-        const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
-        const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
-        const cour=o.custCourier!=null?o.custCourier:cf(tgw);
-        const disc=o.discTotal||sub;const grand=disc+cour;
-        return(
-          <Card key={o.id} style={{marginBottom:16}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12}}>
-              <div><div style={{fontWeight:'bold',fontSize:15,color:G.gd}}>{o.id}</div><div style={{fontSize:11,color:G.mut}}>{o.date} {o.time}</div></div>
-              <span style={{background:sc.bg,color:sc.c,borderRadius:10,padding:'3px 10px',fontSize:11,fontWeight:'bold'}}>{o.status}</span>
-            </div>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:10}}>
-              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>CUSTOMER</div><input value={o.cname} onChange={e=>upd(o.id,'cname',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
-              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>MOBILE</div><input value={o.mob} onChange={e=>upd(o.id,'mob',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
-              <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>STATUS</div>
-                <select value={o.status} onChange={e=>{upd(o.id,'status',e.target.value); syncOrder({...o,status:e.target.value});}} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}>
-                  <option value="pending">Pending</option><option value="processing">Processing</option><option value="shipped">Shipped</option>
-                </select>
-              </div>
-            </div>
-            <div style={{marginBottom:10}}><div style={{fontSize:10,color:G.mut,marginBottom:3}}>ADDRESS</div><textarea value={o.addr} onChange={e=>upd(o.id,'addr',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:11,boxSizing:'border-box',minHeight:44,resize:'vertical'}}/></div>
-            {/* Fix 4: the customer's uploaded payment screenshot */}
-            <div style={{marginBottom:10,padding:10,borderRadius:8,background:o.proofUrl?G.gl:'#FFEBEE',border:`1px solid ${o.proofUrl?G.g:G.rl}`}}>
-              <div style={{fontSize:10,color:G.mut,marginBottom:6,fontWeight:'bold'}}>
-                PAYMENT PROOF {o.payMethod&&<span style={{color:G.tx}}>· {o.payMethod==='alipay'?'💙 Alipay':'💚 WeChat Pay'}</span>}
-              </div>
-              {o.proofUrl
-                ? <a href={o.proofUrl} target="_blank" rel="noopener noreferrer" title="Click to open full size">
-                    <img src={o.proofUrl} alt={`Payment proof for ${o.id}`} style={{maxWidth:200,maxHeight:200,objectFit:'contain',borderRadius:6,border:`1px solid ${G.brd}`,background:G.w,display:'block',cursor:'zoom-in'}}/>
-                  </a>
-                : <div style={{fontSize:12,color:G.rd,fontWeight:'bold'}}>⚠️ No payment proof uploaded for this order.</div>
-              }
-            </div>
-            <div style={{background:G.bg,borderRadius:8,padding:10,marginBottom:10}}>
-              {o.items.map((it,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:3}}><span>{it.name} ×{it.qty}</span><span>¥{(it.up*it.qty).toFixed(2)}</span></div>)}
-              <div style={{borderTop:`1px solid ${G.brd}`,marginTop:7,paddingTop:7}}>
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:12}}><span>Subtotal</span><span>¥{sub.toFixed(2)}</span></div>
-                {disc!==sub&&<div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:G.gd}}><span>After Discount</span><span>¥{disc.toFixed(2)}</span></div>}
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:12,alignItems:'center'}}>
-                  <span>Courier</span>
-                  <div style={{display:'flex',alignItems:'center',gap:5}}>
-                    <input type="number" value={o.custCourier??''} onChange={e=>upd(o.id,'custCourier',e.target.value===''?null:+e.target.value)} onBlur={()=>syncOrder(o)} placeholder={String(cf(tgw))} style={{width:58,padding:'2px 5px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/>
-                    <span>¥{cour.toFixed(2)}</span>
-                  </div>
-                </div>
-                <div style={{display:'flex',justifyContent:'space-between',fontWeight:'bold',fontSize:14,marginTop:5,color:G.gd}}><span>Grand Total</span><span>¥{grand.toFixed(2)}</span></div>
-              </div>
-            </div>
-            <div style={{marginBottom:10,display:'flex',alignItems:'center',gap:8,fontSize:12}}>
-              <span style={{color:G.tx,whiteSpace:'nowrap'}}>Custom discount price (¥):</span>
-              <input type="number" value={o.discTotal??''} onChange={e=>upd(o.id,'discTotal',e.target.value?+e.target.value:null)} onBlur={()=>syncOrder(o)} placeholder="Optional" style={{width:90,padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
-            </div>
-            <div style={{marginBottom:12}}>
-              <div style={{fontWeight:'bold',fontSize:12,marginBottom:6}}>📦 Tracking Numbers</div>
-              {o.tracking.map((tk,i)=>(
-                <div key={i} style={{display:'flex',gap:6,marginBottom:5}}>
-                  <input value={tk} onChange={e=>{const tr=[...o.tracking];tr[i]=e.target.value;upd(o.id,'tracking',tr);}} onBlur={()=>syncOrder(o)} style={{flex:1,padding:'5px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
-                  <button onClick={()=>{const nt=o.tracking.filter((_,j)=>j!==i);upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>
-                </div>
-              ))}
-              <Btn sm v='info' onClick={()=>{const nt=[...o.tracking,''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
-            </div>
-            <div style={{display:'flex',gap:8}}>
-              <Btn onClick={()=>setConf({msg:`Complete order ${o.id} and move to Sales List?`,yes:()=>complete(o)})}>✅ Complete Order</Btn>
-              <Btn v='danger' sm onClick={()=>setConf({msg:'Cancel this order?',yes:()=>{upd(o.id,'status','cancelled');syncOrder({...o,status:'cancelled'});setConf(null);}})}>Cancel</Btn>
-            </div>
-          </Card>
-        );
-      })}
-    </div>
-  );
-}
-
-function SITab({prods,inv,sales,setSales,catColors}) {
-  function blankSIItem(){return {name:'',pw:'',qty:'',unit:'PCS',up:'',tp:'',gw:'',exps:[],exp:''};}
-  const [cust,setCust]=useState({name:'',addr:'',mob:''});
-  const [items,setItems]=useState([blankSIItem()]);
-  const [ctype,setCtype]=useState('Not Free');
-  const [ccour,setCcour]=useState('');
-  const [dtype,setDtype]=useState('No');
-  const [dpct,setDpct]=useState(0);
-  const [cdsc,setCdsc]=useState('');
-  const [selIt,setSelIt]=useState([]);
-  const [sdpct,setSdpct]=useState(10);
-  const [curId,setCurId]=useState(null);
-  const [onum,setOnum]=useState(()=>nextSeq(sales));
-  const [rq,setRq]=useState('');
-  const [rsel,setRsel]=useState([]);
-
-  const sub=items.reduce((s,i)=>s+(+i.tp||0),0);
-  const tgw=items.reduce((s,i)=>s+(+i.gw||0)*(+i.qty||0),0);
-  const cour=ctype==='Free'?0:ctype==='Not Free'?cf(tgw):(+ccour||0);
-  const damt=dtype==='Yes'?sub*(+dpct/100):dtype==='Customized Discount'?(+cdsc||0):0;
-  const pad=sub-damt; const grand=pad+cour;
-  const hasDsc = dtype!=='No';
-
-  function recalcRow(u){ u.tp=(+(u.qty||0)*(+(u.up||0))).toFixed(2); return u; }
-  function updIt(idx,f,v){
-    setItems(prev=>prev.map((it,i)=>{
-      if(i!==idx) return it;
-      let u={...it,[f]:v};
-      if(f==='name'&&v===''){u.pw='';u.up='';u.gw='';u.exps=[];u.exp='';}
-      return recalcRow(u);
-    }));
-  }
-  function selectProduct(idx,p){
-    setItems(prev=>{
-      const exps = inv.filter(x=>x.name===p.name && x.qty>0).map(x=>({exp:x.exp,qty:x.qty}));
-      const next = prev.map((it,i)=> i!==idx ? it : recalcRow({...it,name:p.name,pw:p.pw,up:ep(p),unit:p.unit,gw:p.gw,exps,exp:''}));
-      return idx===prev.length-1 ? [...next, blankSIItem()] : next;
-    });
-  }
-  function applySD(){
-    setItems(prev=>prev.map((it,i)=>{
-      if(!selIt.includes(i)) return it;
-      const p=prods.find(x=>x.name===it.name); const bp=p?p.sp:+it.up;
-      const np=+(bp*(1-sdpct/100)).toFixed(2);
-      return recalcRow({...it,up:np});
-    }));
-    setSelIt([]);
-  }
-  function resetForm(){
-    setCust({name:'',addr:'',mob:''});setItems([blankSIItem()]);setCtype('Not Free');setCcour('');setDtype('No');setDpct(0);setCdsc('');setCurId(null);setOnum(nextSeq(sales));
-  }
-  async function save(){
+    if(saving) return;
     const fi=items.filter(i=>i.name&&i.qty);
     if(!fi.length){alert('Add at least one item');return;}
-    const existing = curId ? sales.find(s=>s.id===curId) : null;
-    const seq = existing ? existing.seq : onum;
-    const draft={seq,date:existing?existing.date:bjDate(),type:'invoice',oid:`INV${seq}`,cname:cust.name,mob:cust.mob,addr:cust.addr,sub,disc:damt,discTotal:pad,courier:cour,grand};
-    const lineItems=fi.map(i=>({name:i.name,qty:+i.qty,up:+i.up,tp:+i.tp}));
-    if(curId){
-      const { error } = await supabase.from('sales').update(toDbSale(draft)).eq('id',curId);
-      if(error){alert('Failed to save: '+error.message);return;}
-      await supabase.from('sale_items').delete().eq('sale_id',curId);
-      const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:curId,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
-      if(itErr){alert('Failed to save items: '+itErr.message);return;}
-      setSales(p=>p.map(x=>x.id===curId?{...draft,id:curId,items:lineItems}:x));
-    } else {
-      const { data, error } = await supabase.from('sales').insert(toDbSale(draft)).select().single();
-      if(error){alert('Failed to save: '+error.message);return;}
-      const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:data.id,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
-      if(itErr){alert('Failed to save items: '+itErr.message);return;}
-      const saved={...draft,id:data.id,items:lineItems};
-      setSales(p=>[saved,...p]); setCurId(saved.id);
+
+    // Link each line back to a real product so stock can be tracked. A line typed
+    // by hand that matches nothing is still allowed — it just doesn't move stock.
+    const lines = fi.map(i=>{
+      const pr = prodFor(i);
+      return { product_id: pr?pr.id:null, name:i.name, qty:+i.qty, unit_price:+i.up||0, total_price:+i.tp||0 };
+    });
+
+    // Friendly pre-check. The database checks again, atomically — this is only
+    // here so you get a clear message instead of a raw Postgres error.
+    const need={};
+    lines.forEach(l=>{ if(l.product_id) need[l.product_id]=(need[l.product_id]||0)+l.qty; });
+    for(const pid of Object.keys(need)){
+      const avail = availFor(+pid);
+      if(need[pid] > avail){
+        const pr = prods.find(x=>String(x.id)===String(pid));
+        alert(`Not enough stock for "${pr?pr.name:pid}" — ${avail} available, this invoice needs ${need[pid]}.`);
+        return;
+      }
     }
-    alert('Sales order saved!');
+
+    const existing = curId ? sales.find(x=>x.id===curId) : null;
+    const seq  = existing ? existing.seq  : onum;
+    const dt   = existing ? existing.date : bjDate();
+    setSaving(true);
+    try{
+      // One call: writes the invoice, its line items, and takes the stock off the
+      // shelf — in a single transaction. Editing an invoice returns its old stock
+      // first, so the new quantities are measured against the true total.
+      const { data: savedId, error } = await supabase.rpc('save_invoice', {
+        p_sale_id:    curId,
+        p_seq:        seq,
+        p_date:       dt,
+        p_oid:        `INV${seq}`,
+        p_cname:      cust.name,
+        p_mob:        cust.mob,
+        p_addr:       cust.addr,
+        p_items:      lines,
+        p_sub:        sub,
+        p_disc:       damt,
+        p_disc_total: pad,
+        p_courier:    cour,
+        p_grand:      grand,
+      });
+      if(error) throw new Error(error.message);
+
+      const saved={
+        id:savedId, seq, date:dt, type:'invoice', oid:`INV${seq}`,
+        cname:cust.name, mob:cust.mob, addr:cust.addr,
+        sub, disc:damt, discTotal:pad, courier:cour, grand,
+        items: lines.map(l=>({pid:l.product_id,name:l.name,qty:l.qty,up:l.unit_price,tp:l.total_price})),
+      };
+      setSales(p=> curId ? p.map(x=>x.id===curId?saved:x) : [saved,...p]);
+      setCurId(savedId);
+      if(reloadProducts) await reloadProducts();
+      alert('Sales invoice saved — stock updated.');
+    }catch(err){
+      alert(err.message || 'Failed to save the invoice.');
+    }finally{ setSaving(false); }
   }
   async function deleteCurrent(){
-    if(!curId){alert('Load or save an order first, or select one below to delete.');return;}
-    const { error } = await supabase.from('sales').delete().eq('id',curId);
+    if(!curId){alert('Load or save an invoice first, or select one below to delete.');return;}
+    if(!window.confirm('Delete this invoice? Its items will be returned to stock.')) return;
+    const { error } = await supabase.rpc('delete_sales', { p_ids: [curId] });
     if(error){alert('Failed to delete: '+error.message);return;}
     setSales(p=>p.filter(x=>x.id!==curId));
+    if(reloadProducts) await reloadProducts();
     resetForm();
   }
   function printCurrent(){
@@ -2203,22 +2012,31 @@ function SITab({prods,inv,sales,setSales,catColors}) {
     openPrintWindow(html);
   }
   function loadOrder(s){
+    // An online sale's stock came off the shelf when the customer checked out.
+    // Editing it here would take it a second time, so don't allow it.
+    if(s.type==='online'){
+      alert('That is a completed online order, not a walk-in invoice.\n\nIts stock was already deducted when the customer checked out, so editing it here would double-count. Manage it from the Online Orders tab instead.');
+      return;
+    }
     setCurId(s.id); setOnum(s.seq);
     setCust({name:s.cname||'',mob:s.mob||'',addr:s.addr||''});
     setItems([...s.items.map(i=>{
-      const p=prods.find(x=>x.name===i.name);
+      const p=prods.find(x=>x.id===i.pid) || prods.find(x=>x.name===i.name);
       const exps = p ? inv.filter(x=>x.name===p.name&&x.qty>0).map(x=>({exp:x.exp,qty:x.qty})) : [];
-      return {name:i.name,pw:p?p.pw:'',qty:String(i.qty),unit:p?p.unit:'PCS',up:String(i.up),tp:String(i.tp),gw:p?p.gw:'',exps,exp:''};
+      return {pid:i.pid||(p?p.id:null),name:i.name,pw:p?p.pw:'',qty:String(i.qty),unit:p?p.unit:'PCS',up:String(i.up),tp:String(i.tp),gw:p?p.gw:'',exps,exp:''};
     }), blankSIItem()]);
     setCtype('Customized Courier'); setCcour(String(s.courier||0));
     setDtype(s.disc>0?'Customized Discount':'No'); setCdsc(String(s.disc||0));
   }
-  async function deleteFromList(id){
-    const { error } = await supabase.from('sales').delete().eq('id',id);
+  async function deleteSelectedInvoices(){
+    if(!rsel.length) return;
+    if(!window.confirm(`Delete ${rsel.length} sale(s)? Items from walk-in invoices will be returned to stock.`)) return;
+    const { error } = await supabase.rpc('delete_sales', { p_ids: rsel });
     if(error){alert('Failed to delete: '+error.message);return;}
-    setSales(p=>p.filter(x=>x.id!==id));
-    if(curId===id) resetForm();
-    setRsel(p=>p.filter(x=>x!==id));
+    setSales(p=>p.filter(x=>!rsel.includes(x.id)));
+    if(curId && rsel.includes(curId)) resetForm();
+    setRsel([]);
+    if(reloadProducts) await reloadProducts();
   }
   function printSale(s){
     openPrintWindow(buildSalesReceiptHTML({orderNo:s.seq,cname:s.cname,mob:s.mob,addr:s.addr,items:s.items,sub:s.sub,pad:s.discTotal,cour:s.courier,grand:s.grand,hasDsc:s.disc>0}));
@@ -2236,7 +2054,7 @@ function SITab({prods,inv,sales,setSales,catColors}) {
         <div style={{fontSize:19,fontWeight:'bold',color:G.dk}}>💰 Sales Invoice</div>
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <Btn onClick={resetForm}>+ New</Btn>
-          <Btn v='info' onClick={save}>💾 Save</Btn>
+          <Btn v='info' onClick={save} disabled={saving||overLines.length>0}>{saving?'Saving…':'💾 Save'}</Btn>
           <Btn v='outline' onClick={printCurrent}>🖨️ Print PDF</Btn>
           <Btn v='danger' onClick={deleteCurrent}>🗑️ Delete</Btn>
           {selIt.length>0&&<><input type="number" value={sdpct} onChange={e=>setSdpct(+e.target.value)} style={{width:52,padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/><Btn v='warn' sm onClick={applySD}>% Apply to Selected</Btn></>}
@@ -2255,6 +2073,16 @@ function SITab({prods,inv,sales,setSales,catColors}) {
         <Card><div style={{fontWeight:'bold',fontSize:13,marginBottom:10,color:G.gd}}>Courier</div><FSel value={ctype} onChange={setCtype} options={['Free','Not Free','Customized Courier']}/>{ctype==='Customized Courier'&&<FInput label="Custom (RMB)" value={ccour} onChange={setCcour} type="number"/>}</Card>
         <Card><div style={{fontWeight:'bold',fontSize:13,marginBottom:10,color:G.gd}}>Discount</div><FSel value={dtype} onChange={setDtype} options={['No','Yes','Customized Discount']}/>{dtype==='Yes'&&<FInput label="Discount %" value={dpct} onChange={setDpct} type="number"/>}{dtype==='Customized Discount'&&<FInput label="Amount (RMB)" value={cdsc} onChange={setCdsc} type="number"/>}</Card>
       </div>
+      {overLines.length>0&&(
+        <div style={{background:'#FFEBEE',border:`1px solid ${G.rd}`,borderRadius:10,padding:12,marginBottom:14}}>
+          <div style={{fontWeight:'bold',color:G.rd,fontSize:13,marginBottom:4}}>⚠️ Not enough stock</div>
+          {overLines.map((i,k)=>{
+            const pr=prodFor(i);
+            return <div key={k} style={{fontSize:12,color:G.rd}}>“{i.name}” — {availFor(pr.id)} available, this invoice needs {i.qty}.</div>;
+          })}
+          <div style={{fontSize:11,color:G.tx,marginTop:5}}>Reduce the quantity, or add stock in the Inventory tab.</div>
+        </div>
+      )}
       <Card style={{marginBottom:14,overflowX:'auto'}}>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:11,minWidth:800}}>
           <thead><tr style={{background:G.gd,color:G.w}}>
@@ -2263,18 +2091,21 @@ function SITab({prods,inv,sales,setSales,catColors}) {
             ))}
           </tr></thead>
           <tbody>{items.map((it,idx)=>{
-            const p=prods.find(x=>x.name===it.name);const tgwR=(+it.gw||0)*(+it.qty||0);
-            const expStock = it.exp ? (it.exps.find(x=>x.exp===it.exp)?.qty) : (p?p.stock:null);
+            const p=prodFor(it);const tgwR=(+it.gw||0)*(+it.qty||0);
+            // What this invoice can actually take: current stock, plus anything this
+            // same invoice already has reserved (only relevant when editing).
+            const avail = p ? availFor(p.id) : null;
+            const over  = avail!=null && (+it.qty||0) > avail;
             return(
               <tr key={idx} style={{background:idx%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
                 <td style={{padding:'5px',textAlign:'center'}}><input type="checkbox" checked={selIt.includes(idx)} onChange={()=>setSelIt(p2=>p2.includes(idx)?p2.filter(x=>x!==idx):[...p2,idx])}/></td>
                 <td style={{padding:'5px'}}>{it.exps.length>0?<select value={it.exp} onChange={e=>updIt(idx,'exp',e.target.value)} style={{padding:'3px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:10}}><option value="">Any</option>{it.exps.map(x=><option key={x.exp} value={x.exp}>{x.exp} ({x.qty})</option>)}</select>:<span style={{color:G.mut,fontSize:10}}>—</span>}</td>
-                <td style={{padding:'5px',textAlign:'center'}}>{expStock!=null?<span style={{...stStyle(expStock),padding:'2px 6px',borderRadius:4,fontSize:10,display:'inline-block'}}>{expStock}</span>:'—'}</td>
+                <td style={{padding:'5px',textAlign:'center'}}>{avail!=null?<span style={{...stStyle(avail),padding:'2px 6px',borderRadius:4,fontSize:10,display:'inline-block',outline:over?`2px solid ${G.rd}`:'none'}}>{avail}</span>:'—'}</td>
                 <td style={{padding:'5px',textAlign:'center'}}>{it.gw||'—'}</td>
                 <td style={{padding:'5px',textAlign:'center',fontWeight:'bold'}}>{tgwR.toFixed(3)}</td>
                 <td style={{padding:'5px',minWidth:150}}><ComboInput value={it.name} onChange={v=>updIt(idx,'name',v)} onPick={p2=>selectProduct(idx,p2)} options={prods} placeholder="Type to search product..."/></td>
                 <td style={{padding:'5px',textAlign:'center'}}>{it.pw||'—'}</td>
-                <td style={{padding:'5px'}}><input type="number" value={it.qty} onChange={e=>updIt(idx,'qty',e.target.value)} style={{width:48,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11,textAlign:'center'}}/></td>
+                <td style={{padding:'5px'}}><input type="number" value={it.qty} onChange={e=>updIt(idx,'qty',e.target.value)} style={{width:48,padding:'4px',borderRadius:4,border:`1px solid ${over?G.rd:G.brd}`,fontSize:11,textAlign:'center',color:over?G.rd:G.dk,fontWeight:over?'bold':'normal'}}/></td>
                 <td style={{padding:'5px',textAlign:'center',fontSize:10}}>{it.unit}</td>
                 <td style={{padding:'5px'}}><input type="number" value={it.up} onChange={e=>updIt(idx,'up',e.target.value)} style={{width:58,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
                 <td style={{padding:'5px',textAlign:'center',fontWeight:'bold',color:G.gd}}>¥{(+it.tp||0).toFixed(2)}</td>
@@ -2301,7 +2132,7 @@ function SITab({prods,inv,sales,setSales,catColors}) {
           <div style={{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}}>
             <Btn sm onClick={()=>{const s=sales.find(x=>x.id===rsel[0]); if(s)loadOrder(s); setRsel([]);}}>📂 Load to Edit</Btn>
             <Btn sm v='outline' onClick={()=>{const s=sales.find(x=>x.id===rsel[0]); if(s)printSale(s);}}>🖨️ Print</Btn>
-            <Btn sm v='danger' onClick={()=>{[...rsel].forEach(deleteFromList);}}>🗑️ Delete Selected ({rsel.length})</Btn>
+            <Btn sm v='danger' onClick={deleteSelectedInvoices}>🗑️ Delete Selected ({rsel.length})</Btn>
           </div>
         )}
         <div style={{overflowX:'auto'}}>
@@ -2323,7 +2154,7 @@ function SITab({prods,inv,sales,setSales,catColors}) {
   );
 }
 
-function SLTab({sales,setSales}) {
+function SLTab({sales,setSales,reloadProducts}) {
   const [q,setQ]=useState('');
   const [exp,setExp]=useState(new Set());
   const [sel,setSel]=useState([]);
@@ -2335,11 +2166,14 @@ function SLTab({sales,setSales}) {
   function toggleAll(){ setSel(allSel ? [] : list.map(s=>s.id)); }
   async function deleteSelected(){
     if(!sel.length) return;
-    if(!window.confirm(`Delete ${sel.length} sales record(s)? This cannot be undone.`)) return;
-    const { error } = await supabase.from('sales').delete().in('id', sel);
+    if(!window.confirm(`Delete ${sel.length} sales record(s)? Items from walk-in invoices will be returned to stock. This cannot be undone.`)) return;
+    // Goes through the database function so that walk-in invoices hand their
+    // stock back. Online sales don't — their stock was taken by the order itself.
+    const { error } = await supabase.rpc('delete_sales', { p_ids: sel });
     if(error){alert('Failed to delete: '+error.message);return;}
     setSales(p=>p.filter(s=>!sel.includes(s.id)));
     setSel([]);
+    if(reloadProducts) await reloadProducts();
   }
   return(
     <div>
@@ -2395,7 +2229,7 @@ function SLTab({sales,setSales}) {
   );
 }
 
-function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout}) {
+function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout,reloadProducts}) {
   const [tab,setTab]=useState('dash');
   const [open,setOpen]=useState(true);
   const tabs=[
@@ -2427,9 +2261,9 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
-          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales}/>}
-          {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors}/>}
-          {tab==='sl'&&<SLTab sales={sales} setSales={setSales}/>}
+          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
+          {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
+          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
         </div>
       </div>
     </div>
@@ -2488,7 +2322,7 @@ export default function App() {
   const [lang,setLang]=useState('en');
   const [auth,setAuth]=useState({loggedIn:false,user:null});
   const [prods,setProds]=useState([]);
-  const [cats,setCats]=useState(['Essentials','Basic Spices','Spice Blends','Desserts','Snacks']);
+  const [cats,setCats]=useState([]);   // loaded from the `categories` table below
   const [catColors,setCatColors]=useState(DEFAULT_CAT_COLORS);
   const [inv,setInv]=useState([]);
   const [delInv,setDelInv]=useState([]);
@@ -2555,12 +2389,21 @@ export default function App() {
   },[]);
   useEffect(()=>{
     async function loadPublicData(){
-      const [prodRes, settingsRes] = await Promise.all([
+      const [prodRes, catRes, settingsRes] = await Promise.all([
         supabase.from('products').select('*').order('id'),
+        supabase.from('categories').select('*').order('sort_order').order('name'),
         supabase.from('site_settings').select('*').eq('id',true).single(),
       ]);
       if(prodRes.error) console.error('loadProducts error:', prodRes.error.message);
       else setProds(prodRes.data.map(fromDbProduct));
+      // Categories + their colours now come from the database instead of being
+      // hardcoded here, so the admin's Category Manager edits actually stick.
+      if(catRes.data && catRes.data.length){
+        setCats(catRes.data.map(c=>c.name));
+        const colors={};
+        catRes.data.forEach(c=>{ colors[c.name]=c.color; });
+        setCatColors(colors);
+      } else if(catRes.error) console.error('loadCategories error:', catRes.error.message);
       if(settingsRes.data){
         setCustomSlides(settingsRes.data.custom_slides || []);
         setQrCodes(settingsRes.data.qr_codes || {alipay:'',wechat:''});
@@ -2649,7 +2492,7 @@ export default function App() {
       {view==='customer'
         ?<CustomerApp prods={prods} cats={cats} cart={cart} addToCart={addToCart} rm={rm} upd={upd} orders={orders} setOrders={setOrders} setCart={setCart} lang={lang} setLang={setLang} auth={auth} setAuth={setAuth} customSlides={customSlides} qrCodes={qrCodes} onOrdersChanged={loadOrders} reloadProducts={reloadProducts}/>
         :(auth.loggedIn && auth.user?.role==='admin'
-            ?<AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes} onLogout={async()=>{await supabase.auth.signOut();setAuth({loggedIn:false,user:null});}}/>
+            ?<AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes} reloadProducts={reloadProducts} onLogout={async()=>{await supabase.auth.signOut();setAuth({loggedIn:false,user:null});}}/>
             :<AdminLogin onLogin={(u)=>setAuth({loggedIn:true,user:u})}/>
           )
       }
