@@ -259,6 +259,29 @@ function CatChip({cat,catColors}) {
   return <span style={{background:c+'22',color:c,borderRadius:10,padding:'2px 9px',fontSize:11,fontWeight:'bold',whiteSpace:'nowrap'}}>{cat}</span>;
 }
 
+// Catches a render crash in any tab and shows the actual error instead of a blank
+// black screen — a white page with the message beats silence when something breaks.
+class TabErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state={err:null}; }
+  static getDerivedStateFromError(err){ return {err}; }
+  componentDidCatch(err,info){ console.error('Tab crashed:', err, info); }
+  render(){
+    if(this.state.err){
+      return (
+        <div style={{padding:24}}>
+          <div style={{background:'#FDECEA',border:'1px solid #E74C3C',borderRadius:10,padding:18,maxWidth:700}}>
+            <div style={{fontWeight:'bold',color:'#B71C1C',fontSize:15,marginBottom:8}}>⚠️ This section hit an error</div>
+            <div style={{fontSize:13,color:'#333',marginBottom:10}}>The rest of the admin panel still works — switch to another tab, or reload the page. Details below.</div>
+            <pre style={{fontSize:11,color:'#7A1C1C',background:'#fff',border:'1px solid #f0c8c8',borderRadius:6,padding:10,overflow:'auto',whiteSpace:'pre-wrap'}}>{String(this.state.err && (this.state.err.stack || this.state.err.message || this.state.err))}</pre>
+            <button onClick={()=>this.setState({err:null})} style={{marginTop:10,background:'#15532D',color:'#fff',border:'none',borderRadius:8,padding:'8px 16px',cursor:'pointer',fontSize:13}}>Try again</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function ConfirmDlg({msg,onYes,onNo}) {
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',zIndex:3000,display:'flex',alignItems:'center',justifyContent:'center'}}>
@@ -3196,7 +3219,7 @@ function SLTab({sales,setSales,reloadProducts}) {
   );
 }
 
-function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout,reloadProducts}) {
+function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout,reloadProducts,reloadInventory}) {
   const [tab,setTab]=useState('dash');
   const [open,setOpen]=useState(true);
   const tabs=[
@@ -3223,6 +3246,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           ))}
         </div>
         <div style={{flex:1,padding:20,minWidth:0,overflowX:'auto'}}>
+         <TabErrorBoundary key={tab}>
           {tab==='dash'&&<DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes}/>}
           {tab==='prods'&&<ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/>}
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv}/>}
@@ -3231,6 +3255,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
+         </TabErrorBoundary>
         </div>
       </div>
     </div>
@@ -3465,7 +3490,7 @@ export default function App() {
       {view==='customer'
         ?<CustomerApp prods={prods} cats={cats} cart={cart} addToCart={addToCart} rm={rm} upd={upd} orders={orders} setOrders={setOrders} setCart={setCart} lang={lang} setLang={setLang} auth={auth} setAuth={setAuth} customSlides={customSlides} qrCodes={qrCodes} onOrdersChanged={loadOrders} reloadProducts={reloadProducts}/>
         :(auth.loggedIn && auth.user?.role==='admin'
-            ?<AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes} reloadProducts={reloadProducts} onLogout={async()=>{await supabase.auth.signOut();setAuth({loggedIn:false,user:null});}}/>
+            ?<AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes} reloadProducts={reloadProducts} reloadInventory={reloadInventory} onLogout={async()=>{await supabase.auth.signOut();setAuth({loggedIn:false,user:null});}}/>
             :<AdminLogin onLogin={(u)=>setAuth({loggedIn:true,user:u})}/>
           )
       }
