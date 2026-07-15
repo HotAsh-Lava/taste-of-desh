@@ -599,6 +599,18 @@ function CartTab({cart,prods,rawTotal,discTotal,hasDsc,totalGW,courierFee,grandT
   );
 }
 
+// Show a stored date (ISO 'YYYY-MM-DD', or anything Date can parse) as DD/MM/YYYY.
+// The date PICKER itself always follows the device's locale — that's set by the
+// operating system and a website can't override it — but everywhere we DISPLAY a
+// date we can use the day/month/year order.
+function ddmmyyyy(v){
+  if(!v) return '';
+  const d = new Date(v);
+  if(isNaN(d)) return v;
+  const p = (x)=>String(x).padStart(2,'0');
+  return `${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()}`;
+}
+
 // A checkerboard, so a transparent image reads as transparent in a preview
 // instead of looking like it has a white background.
 const CHECKER = {
@@ -1201,6 +1213,7 @@ function Checkout({step,setStep,info,setInfo,addrs,cart,rawTotal,discTotal,hasDs
   const [proofPreview,setProofPreview] = useState('');
   const [selAddr,setSelAddr] = useState(null);
   const fileRef = useRef(null);
+  const cameraRef = useRef(null);
   function selectAddr(a){setSelAddr(a.id);setInfo({name:a.name,mob:a.mob,addr:a.addr});}
 
   // Fix 4: a real file picker. Validates type + size, shows a preview,
@@ -1290,17 +1303,28 @@ function Checkout({step,setStep,info,setInfo,addrs,cart,rawTotal,discTotal,hasDs
               <div>2. Screenshot the confirmation page</div>
               <div>3. Upload screenshot below as proof</div>
             </div>
-            <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onPickFile} style={{display:'none'}}/>
-            <div onClick={()=>fileRef.current&&fileRef.current.click()} style={{border:`2px dashed ${proofFile?G.g:G.brd}`,borderRadius:12,padding:proofFile?12:22,textAlign:'center',cursor:'pointer',background:proofFile?G.gl:G.w,marginBottom:18}}>
-              {proofFile
-                ?<>
-                   {proofPreview&&<img src={proofPreview} alt="Payment proof" style={{maxWidth:'100%',maxHeight:180,objectFit:'contain',borderRadius:8,marginBottom:8,display:'block',margin:'0 auto 8px'}}/>}
-                   <div style={{color:G.gd,fontWeight:'bold',fontSize:13}}>✅ {t('paymentUploaded')}</div>
-                   <div style={{color:G.mut,fontSize:11,marginTop:2}}>Tap to choose a different image</div>
-                 </>
-                :<><div style={{fontSize:32,marginBottom:6}}>📷</div><div style={{color:G.tx,fontSize:13}}>{t('uploadProof')}</div><div style={{color:G.mut,fontSize:11}}>JPG, PNG · max 5MB</div></>
-              }
-            </div>
+            {/* Gallery input has NO capture attribute, so phones show the photo
+                library / file picker. The camera input keeps capture, so it opens
+                the camera directly. Two buttons = no guessing for the customer. */}
+            <input ref={fileRef}    type="file" accept="image/*" onChange={onPickFile} style={{display:'none'}}/>
+            <input ref={cameraRef}  type="file" accept="image/*" capture="environment" onChange={onPickFile} style={{display:'none'}}/>
+            {!proofFile ? (
+              <div style={{border:`2px dashed ${G.brd}`,borderRadius:12,padding:18,textAlign:'center',background:G.w,marginBottom:18}}>
+                <div style={{fontSize:30,marginBottom:8}}>🧾</div>
+                <div style={{color:G.tx,fontSize:13,marginBottom:12}}>{t('uploadProof')}</div>
+                <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
+                  <Btn onClick={()=>fileRef.current&&fileRef.current.click()}>🖼️ Choose from Gallery</Btn>
+                  <Btn v='outline' onClick={()=>cameraRef.current&&cameraRef.current.click()}>📷 Take Photo</Btn>
+                </div>
+                <div style={{color:G.mut,fontSize:11,marginTop:10}}>JPG, PNG · max 5MB</div>
+              </div>
+            ) : (
+              <div onClick={()=>fileRef.current&&fileRef.current.click()} style={{border:`2px dashed ${G.g}`,borderRadius:12,padding:12,textAlign:'center',cursor:'pointer',background:G.gl,marginBottom:18}}>
+                {proofPreview&&<img src={proofPreview} alt="Payment proof" style={{maxWidth:'100%',maxHeight:180,objectFit:'contain',borderRadius:8,marginBottom:8,display:'block',margin:'0 auto 8px'}}/>}
+                <div style={{color:G.gd,fontWeight:'bold',fontSize:13}}>✅ {t('paymentUploaded')}</div>
+                <div style={{color:G.mut,fontSize:11,marginTop:2}}>Tap to choose a different image</div>
+              </div>
+            )}
             <button disabled={!proofFile||placing} onClick={()=>{ if(proofFile&&!placing) placeOrder(method, proofFile); }}
               style={{width:'100%',background:(proofFile&&!placing)?G.gd:G.mut,color:G.w,border:'none',borderRadius:12,padding:14,cursor:(proofFile&&!placing)?'pointer':'not-allowed',fontSize:15,fontWeight:'bold'}}>
               {placing ? 'Placing your order…' : t('submitOrder')}
@@ -1468,8 +1492,16 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
 
 function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,qrCodes,setQrCodes}) {
   const lowStock=prods.filter(p=>p.stock<3);
+  const outStock=prods.filter(p=>p.stock<=0);
   const expiring=inv.filter(i=>{const d=(new Date(i.exp)-new Date())/86400000;return d>0&&d<90;});
   const expired=inv.filter(i=>new Date(i.exp)<new Date()&&i.qty>0);
+  // Group the low-stock list by category so the alerts panel reads as a table
+  // instead of one giant run-on paragraph.
+  const lowByCat=useMemo(()=>{
+    const m={};
+    lowStock.forEach(p=>{ (m[p.cat||'Uncategorised']=m[p.cat||'Uncategorised']||[]).push(p); });
+    return Object.entries(m).sort((a,b)=>a[0].localeCompare(b[0]));
+  },[prods]);
   const totalRev=sales.reduce((s,o)=>s+o.grand,0);
   const pendingN=orders.filter(o=>o.status==='pending').length;
   const [capt,setCapt]=useState('');
@@ -1568,12 +1600,44 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
   return(
     <div>
       <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:16}}>📊 Dashboard</div>
-      {(lowStock.length>0||expired.length>0)&&(
-        <div style={{background:'#FFF3CD',border:'1px solid #FFEAA7',borderRadius:10,padding:12,marginBottom:18}}>
-          <div style={{fontWeight:'bold',color:G.yd,marginBottom:6}}>⚠️ Alerts</div>
-          {lowStock.length>0&&<div style={{color:G.rd,fontSize:12,marginBottom:2}}>🔴 Low stock (&lt;3 units): {lowStock.map(p=>p.name).join(', ')}</div>}
-          {expired.length>0&&<div style={{color:G.rd,fontSize:12}}>🔴 Expired inventory: {expired.length} batch(es)</div>}
-        </div>
+      {(lowStock.length>0||expired.length>0||expiring.length>0)&&(
+        <Card style={{marginBottom:18,border:`1px solid ${G.gold}`,background:'#FFFDF5'}}>
+          <div style={{fontWeight:'bold',color:G.yd,marginBottom:12,fontSize:15}}>⚠️ Alerts</div>
+
+          {/* Summary chips */}
+          <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:lowByCat.length?14:0}}>
+            {outStock.length>0&&<div style={{background:'#FDECEA',border:`1px solid ${G.rd}`,borderRadius:8,padding:'6px 12px',fontSize:12,color:G.rd,fontWeight:'bold'}}>⛔ {outStock.length} out of stock</div>}
+            <div style={{background:'#FFF3E0',border:`1px solid ${G.yd}`,borderRadius:8,padding:'6px 12px',fontSize:12,color:'#8a6d00',fontWeight:'bold'}}>🔻 {lowStock.length} low stock (&lt;3)</div>
+            {expiring.length>0&&<div style={{background:'#FFF8E1',border:`1px solid ${G.yd}`,borderRadius:8,padding:'6px 12px',fontSize:12,color:'#8a6d00',fontWeight:'bold'}}>⏳ {expiring.length} expiring soon</div>}
+            {expired.length>0&&<div style={{background:'#FDECEA',border:`1px solid ${G.rd}`,borderRadius:8,padding:'6px 12px',fontSize:12,color:G.rd,fontWeight:'bold'}}>💀 {expired.length} expired batch(es)</div>}
+          </div>
+
+          {/* Low-stock table, grouped by category */}
+          {lowByCat.length>0&&(
+            <div style={{overflowX:'auto'}}>
+              <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                <thead>
+                  <tr style={{background:G.gd,color:G.w}}>
+                    <th style={{padding:'8px 10px',textAlign:'left'}}>Category</th>
+                    <th style={{padding:'8px 10px',textAlign:'left'}}>Product</th>
+                    <th style={{padding:'8px 10px',textAlign:'center',whiteSpace:'nowrap'}}>Stock left</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lowByCat.map(([cat,items])=>items.map((p,idx)=>(
+                    <tr key={p.id} style={{borderBottom:`1px solid ${G.brd}`}}>
+                      {idx===0&&<td rowSpan={items.length} style={{padding:'7px 10px',verticalAlign:'top',fontWeight:'bold',borderRight:`1px solid ${G.brd}`}}><CatChip cat={cat} catColors={catColors}/></td>}
+                      <td style={{padding:'7px 10px'}}>{p.name}</td>
+                      <td style={{padding:'7px 10px',textAlign:'center'}}>
+                        <span style={{background:p.stock<=0?'#FDECEA':'#FFF3E0',color:p.stock<=0?G.rd:'#8a6d00',fontWeight:'bold',padding:'2px 10px',borderRadius:20,display:'inline-block',minWidth:24}}>{p.stock}</span>
+                      </td>
+                    </tr>
+                  )))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Card>
       )}
       <Card style={{marginBottom:18}}>
         <div style={{fontWeight:'bold',fontSize:14,marginBottom:4,color:G.dk}}>🖼️ Home Slideshow Images</div>
@@ -2101,14 +2165,18 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:950}}>
           <thead><tr style={{background:G.gd,color:G.w}}>
             <th style={{padding:'9px 7px',textAlign:'center'}}><input type="checkbox" checked={allSel} onChange={toggleAll}/></th>
-            {['ID','Picture','Product Name','UPC/Barcode','Category','Unit','Packed (g)','Gross (KG)','Sell (RMB)','Cost (RMB)','Stock','Discount','Edit'].map(h=>(
+            {['S.No','Picture','Product Name','UPC/Barcode','Category','Unit','Packed (g)','Gross (KG)','Sell (RMB)','Cost (RMB)','Stock','Discount','Edit'].map(h=>(
               <th key={h} style={{padding:'9px 7px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
             ))}
           </tr></thead>
           <tbody>{list.map((p,i)=>{const isS=sel.includes(p.id);return(
             <tr key={p.id} style={{background:isS?G.gl:i%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
               <td style={{padding:'7px',textAlign:'center'}}><input type="checkbox" checked={isS} onChange={()=>tog(p.id)}/></td>
-              <td style={{padding:'7px',textAlign:'center',color:G.mut}}>{p.id}</td>
+              {/* Running serial number that always follows the current sort/filter,
+                  so it stays 1,2,3… even after products are added or deleted.
+                  The real database id is kept underneath in grey, since orders and
+                  inventory still reference it. */}
+              <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>{i+1}<div style={{fontSize:9,color:G.mut,fontWeight:'normal'}}>#{p.id}</div></td>
               <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} alt={p.name} style={{width:40,height:40,objectFit:'contain',borderRadius:6}}/>:<span style={{fontSize:24}}>{ICONS[p.cat]||'📦'}</span>}</td>
               <td style={{padding:'7px'}}><div style={{fontWeight:'bold'}}>{p.name}</div>{p.offer&&<span style={{background:'#FFCDD2',color:'#B71C1C',borderRadius:4,padding:'1px 5px',fontSize:10,fontWeight:'bold'}}>On Offer</span>}</td>
               <td style={{padding:'7px',textAlign:'center',color:G.mut,fontSize:11}}>{p.upc||'—'}</td>
@@ -2180,7 +2248,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
     });
   },[inv,q,cats]);
   const matching=useMemo(()=>{if(!srch)return[];return prods.filter(p=>p.name.toLowerCase().includes(srch.toLowerCase())||(p.upc||'').includes(srch)).slice(0,8);},[srch,prods]);
-  function selProd(p){setNi({name:p.name,cat:p.cat,qty:'',exp:'',sp:p.sp,cp:p.cp||'',pw:p.pw,upc:p.upc||''});setSrch(p.name);}
+  function selProd(p){setNi({name:p.name,cat:p.cat,qty:'',exp:'',sp:p.sp,cp:p.cp||'',pw:p.pw,upc:p.upc||''});setSrch('');}   // clear srch so the dropdown closes
   async function addItem(){
     if(!ni.name||!ni.qty||!ni.exp){alert('Product, quantity and expiry date required');return;}
     const draft={date:bjDate(),ts:bjTime(),...ni,qty:+ni.qty,sp:+ni.sp,cp:+ni.cp,pw:+ni.pw};
@@ -2313,7 +2381,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
               <td style={{padding:'7px',fontWeight:'bold'}}>{item.name}</td>
               <td style={{padding:'7px',textAlign:'center'}}><CatChip cat={item.cat} catColors={catColors}/></td>
               <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>{item.qty}</td>
-              <td style={{padding:'7px',textAlign:'center',fontWeight:'bold',fontSize:11}}>{item.exp}</td>
+              <td style={{padding:'7px',textAlign:'center',fontWeight:'bold',fontSize:11}}>{ddmmyyyy(item.exp)}</td>
               <td style={{padding:'7px',textAlign:'center'}}>¥{item.sp}</td>
               <td style={{padding:'7px',textAlign:'center'}}>{item.cp?`¥${item.cp}`:'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}>{item.pw}</td>
@@ -2368,24 +2436,37 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
         onSaved={updated=>{ setInv(p=>p.map(x=>{const u=updated.find(y=>y.id===x.id); return u||x;})); setSel([]); }}/>}
       {showAdd&&(
         <Overlay title="Add Inventory Item" onClose={()=>setShowAdd(false)} width={520}>
-          <div style={{position:'relative',marginBottom:14}}>
-            <div style={{fontSize:11,color:G.tx,marginBottom:3,fontWeight:'600'}}>Search Product (name or UPC)</div>
-            <input value={srch} onChange={e=>setSrch(e.target.value)} placeholder="Type to search..." style={{width:'100%',padding:'8px 11px',borderRadius:7,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box'}}/>
-            {matching.length>0&&(
-              <div style={{position:'absolute',top:'100%',left:0,right:0,background:G.w,border:`1px solid ${G.brd}`,borderRadius:8,boxShadow:'0 4px 12px rgba(0,0,0,0.12)',zIndex:100,maxHeight:200,overflow:'auto'}}>
-                {matching.map(p=>(
-                  <div key={p.id} onClick={()=>selProd(p)} style={{padding:'9px 12px',cursor:'pointer',fontSize:12,borderBottom:`1px solid ${G.bg}`}}>
-                    <div style={{fontWeight:'bold'}}>{p.name}</div>
-                    <div style={{color:G.mut,fontSize:11}}>{p.cat} · {p.pw}g{p.upc?' · '+p.upc:''}</div>
-                  </div>
-                ))}
+          {/* Once a product is picked the search box disappears — you only see the
+              chosen product, with a Change button to search again. This stops the
+              dropdown lingering over the form after a selection. */}
+          {!ni.name ? (
+            <div style={{position:'relative',marginBottom:14}}>
+              <div style={{fontSize:11,color:G.tx,marginBottom:3,fontWeight:'600'}}>Search Product (name or UPC)</div>
+              <input autoFocus value={srch} onChange={e=>setSrch(e.target.value)} placeholder="Type to search..." style={{width:'100%',padding:'8px 11px',borderRadius:7,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box'}}/>
+              {matching.length>0&&(
+                <div style={{position:'absolute',top:'100%',left:0,right:0,background:G.w,border:`1px solid ${G.brd}`,borderRadius:8,boxShadow:'0 4px 12px rgba(0,0,0,0.12)',zIndex:100,maxHeight:200,overflow:'auto'}}>
+                  {matching.map(p=>(
+                    <div key={p.id} onClick={()=>selProd(p)} style={{padding:'9px 12px',cursor:'pointer',fontSize:12,borderBottom:`1px solid ${G.bg}`}}>
+                      <div style={{fontWeight:'bold'}}>{p.name}</div>
+                      <div style={{color:G.mut,fontSize:11}}>{p.cat} · {p.pw}g{p.upc?' · '+p.upc:''}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {srch&&matching.length===0&&<div style={{fontSize:11,color:G.mut,marginTop:5}}>No product matches “{srch}”.</div>}
+            </div>
+          ) : (
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',background:G.gl,borderRadius:8,padding:'10px 12px',marginBottom:14,gap:10}}>
+              <div>
+                <div style={{fontWeight:'bold',color:G.gd,fontSize:13}}>{ni.name}</div>
+                <div style={{color:G.tx,fontSize:11}}>{ni.cat} · {ni.pw}g{ni.upc?' · '+ni.upc:''}</div>
               </div>
-            )}
-          </div>
-          {ni.name&&<div style={{background:G.gl,borderRadius:8,padding:'8px 12px',marginBottom:12,fontSize:12}}><div style={{fontWeight:'bold',color:G.gd}}>{ni.name}</div><div style={{color:G.tx}}>{ni.cat} · {ni.pw}g</div></div>}
+              <Btn sm v='outline' onClick={()=>{setNi({name:'',cat:'',qty:'',exp:'',sp:'',cp:'',pw:'',upc:''});setSrch('');}}>Change</Btn>
+            </div>
+          )}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
             <FInput label="Quantity (PCS) *" value={ni.qty} onChange={v=>setNi(p=>({...p,qty:v}))} type="number" req/>
-            <FInput label="Expiry Date *" value={ni.exp} onChange={v=>setNi(p=>({...p,exp:v}))} type="date" req/>
+            <div><FInput label="Expiry Date *" value={ni.exp} onChange={v=>setNi(p=>({...p,exp:v}))} type="date" req/>{ni.exp&&<div style={{fontSize:10,color:G.gd,marginTop:-6,marginBottom:8}}>📅 {ddmmyyyy(ni.exp)}</div>}</div>
             <FInput label="Selling Price (RMB)" value={ni.sp} onChange={v=>setNi(p=>({...p,sp:v}))} type="number"/>
             <FInput label="Cost Price (RMB)" value={ni.cp} onChange={v=>setNi(p=>({...p,cp:v}))} type="number"/>
           </div>
