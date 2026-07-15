@@ -1450,7 +1450,9 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
 
   // Only THIS customer's orders — matched on the account that placed them,
   // not on a typed-in name (which anyone could reuse).
-  const myOrders=orders.filter(o=>o.userId && o.userId===auth.user?.id);
+  // A customer sees their own orders, but not ones the shop has cancelled —
+  // a cancelled order shouldn't linger in their list showing stale item info.
+  const myOrders=orders.filter(o=>o.userId && o.userId===auth.user?.id && o.status!=='cancelled');
   return(
     <div style={{maxWidth:480,margin:'0 auto',background:'#FAFBFA',minHeight:'calc(100vh - 48px)',position:'relative'}}>
       <div style={{background:'#1B7D3F',padding:'0 16px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:10}}>
@@ -2700,7 +2702,7 @@ function PLTab({pos,setPOs,inv,setInv,catColors}) {
   );
 }
 
-function OOTab({orders,setOrders,sales,setSales,reloadProducts}) {
+function OOTab({orders,setOrders,sales,setSales,reloadProducts,reloadInventory}) {
   const [conf,setConf]=useState(null);
   const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
   const stC={pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd}};
@@ -2712,16 +2714,17 @@ function OOTab({orders,setOrders,sales,setSales,reloadProducts}) {
     }).eq('id',o.id);
     if(error) console.error('syncOrder error:', error.message);
   }
-  // Cancelling puts the reserved stock back on the shelf.
-  // (The inventory batch it came out of is not recreated — if you need the expiry
-  // date tracked again, re-add the batch in the Inventory tab.)
+  // Cancelling returns the goods to BOTH places: the product's stock counter
+  // AND the Inventory tab (a fresh batch is created for each line, since the
+  // original batch rows were consumed when the order was placed).
   async function cancelOrder(o){
-    const { error: rpcErr } = await supabase.rpc('restore_order_stock', { p_order_id: o.id });
+    const { error: rpcErr } = await supabase.rpc('cancel_order_restore', { p_order_id: o.id });
     if(rpcErr){ alert('Failed to return the stock: '+rpcErr.message); return; }
     const { error } = await supabase.from('orders').update({status:'cancelled'}).eq('id',o.id);
     if(error){ alert('Failed to cancel the order: '+error.message); return; }
     upd(o.id,'status','cancelled');
     if(reloadProducts) await reloadProducts();
+    if(reloadInventory) await reloadInventory();   // pull the recreated batches into the table
     setConf(null);
   }
   async function complete(o){
@@ -2745,7 +2748,7 @@ function OOTab({orders,setOrders,sales,setSales,reloadProducts}) {
     <div>
       {conf&&<ConfirmDlg msg={conf.msg} onYes={conf.yes} onNo={()=>setConf(null)}/>}
       <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:4}}>🛒 Online Orders</div>
-      <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Active: {active.length} · Total: {orders.length}</div>
+      <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Active: {active.length} · Cancelled: {orders.filter(o=>o.status==='cancelled').length} · Total: {orders.length}</div>
       {active.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No active orders</div></Card>:active.map(o=>{
         const sc=stC[o.status]||stC.pending;
         const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
@@ -3225,7 +3228,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
-          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
+          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
         </div>
@@ -3350,6 +3353,13 @@ export default function App() {
     const { data, error } = await supabase.from('products').select('*').order('id');
     if(error){ console.error('loadProducts error:', error.message); return; }
     setProds(data.map(fromDbProduct));
+  },[]);
+  // Re-pull inventory after a cancel restores batches, so the Inventory tab
+  // reflects the returned stock without needing a full page reload.
+  const reloadInventory = useCallback(async ()=>{
+    const { data, error } = await supabase.from('inventory').select('*').order('id');
+    if(error){ console.error('loadInventory error:', error.message); return; }
+    setInv(data.map(fromDbInv));
   },[]);
   useEffect(()=>{
     async function loadPublicData(){
