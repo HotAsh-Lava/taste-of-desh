@@ -389,7 +389,7 @@ function PCard({p,addToCart}) {
       {p.isNew&&<span style={{position:'absolute',top:10,left:10,background:G.bd,color:G.w,borderRadius:6,padding:'2px 7px',fontSize:9,fontWeight:'bold'}}>NEW</span>}
       {p.img
         ? <div style={{width:'100%',height:126,borderRadius:10,marginBottom:8,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}>
-            <img src={p.img} alt={p.name} style={{maxWidth:'100%',maxHeight:'100%',width:'auto',height:'auto',objectFit:'contain',display:'block'}}/>
+            <img src={p.img} alt={p.name} loading="lazy" decoding="async" style={{maxWidth:'100%',maxHeight:'100%',width:'auto',height:'auto',objectFit:'contain',display:'block'}}/>
           </div>
         : <div style={{fontSize:50,textAlign:'center',marginBottom:8,height:126,display:'flex',alignItems:'center',justifyContent:'center'}}>{ICONS[p.cat]||'📦'}</div>
       }
@@ -575,7 +575,7 @@ function CartTab({cart,prods,rawTotal,discTotal,hasDsc,totalGW,courierFee,grandT
           <div key={item.id} style={{background:G.w,borderRadius:14,padding:14,marginBottom:10,boxShadow:'0 2px 6px rgba(20,40,25,0.06)',display:'flex',gap:12,alignItems:'flex-start'}}>
             {item.img
               ? <div style={{width:60,height:60,flexShrink:0,borderRadius:10,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden'}}>
-                  <img src={item.img} alt={item.name} style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain',display:'block'}}/>
+                  <img src={item.img} alt={item.name} loading="lazy" decoding="async" style={{maxWidth:'100%',maxHeight:'100%',objectFit:'contain',display:'block'}}/>
                 </div>
               : <div style={{fontSize:38,flexShrink:0}}>{ICONS[item.cat]||'📦'}</div>}
             <div style={{flex:1}}>
@@ -1492,7 +1492,7 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
         {tab==='cart'&&<CartTab cart={cart} prods={prods} rawTotal={rawTotal} discTotal={discTotal} hasDsc={hasDsc} totalGW={totalGW} courierFee={courierFee} grandTotal={grandTotal} upd={upd} rm={rm} setCO={setCO} t={t} auth={auth} onRequireLogin={requireLogin}/>}
         {tab==='profile'&&<ProfileTab addrs={addrs} setAddrs={setAddrs} orders={myOrders} auth={auth} setAuth={setAuth} lang={lang} setLang={setLang} t={t}/>}
       </div>
-      {cartN>0&&tab!=='cart'&&(
+      {cartN>0&&tab!=='cart'&&tab!=='profile'&&(
         <div onClick={()=>setTab('cart')} style={{position:'fixed',bottom:73,left:'50%',transform:'translateX(-50%)',maxWidth:444,width:'calc(100% - 32px)',background:G.gd,color:G.w,borderRadius:22,padding:'11px 18px',display:'flex',alignItems:'center',gap:10,cursor:'pointer',boxShadow:'0 4px 18px rgba(0,0,0,0.28)',zIndex:50}}>
           <div style={{background:G.gold,color:G.gd,borderRadius:'50%',width:27,height:27,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:'bold',fontSize:12,flexShrink:0}}>{cartN}</div>
           <div style={{flex:1}}><div style={{fontWeight:'bold',fontSize:13}}>{cartN} item{cartN>1?'s':''} in cart</div><div style={{fontSize:11,opacity:0.8}}>Tap to view</div></div>
@@ -2213,7 +2213,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
                   The real database id is kept underneath in grey, since orders and
                   inventory still reference it. */}
               <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>{i+1}<div style={{fontSize:9,color:G.mut,fontWeight:'normal'}}>#{p.id}</div></td>
-              <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} alt={p.name} style={{width:40,height:40,objectFit:'contain',borderRadius:6}}/>:<span style={{fontSize:24}}>{ICONS[p.cat]||'📦'}</span>}</td>
+              <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} alt={p.name} loading="lazy" decoding="async" style={{width:40,height:40,objectFit:'contain',borderRadius:6}}/>:<span style={{fontSize:24}}>{ICONS[p.cat]||'📦'}</span>}</td>
               <td style={{padding:'7px'}}><div style={{fontWeight:'bold'}}>{p.name}</div>{p.offer&&<span style={{background:'#FFCDD2',color:'#B71C1C',borderRadius:4,padding:'1px 5px',fontSize:10,fontWeight:'bold'}}>On Offer</span>}</td>
               <td style={{padding:'7px',textAlign:'center',color:G.mut,fontSize:11}}>{p.upc||'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}><CatChip cat={p.cat} catColors={catColors}/></td>
