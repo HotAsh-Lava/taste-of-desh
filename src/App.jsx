@@ -1777,6 +1777,23 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
   );
 }
 
+// A read-only stock display for the product forms. Stock is now owned entirely by
+// the Inventory tab: products.stock is the sum of that product's inventory batches,
+// kept in step by a database trigger. You raise stock by adding an inventory batch,
+// not by typing a number here.
+function StockReadout({value,note}) {
+  return (
+    <div style={{marginBottom:10}}>
+      <div style={{fontSize:11,fontWeight:'600',marginBottom:3,color:'#555'}}>Stock Quantity</div>
+      <div style={{padding:'8px 11px',borderRadius:8,border:'1px dashed #bbb',background:'#F5F5F5',fontSize:13,color:'#333',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+        <span style={{fontWeight:'bold'}}>{value===''||value==null?'—':value}</span>
+        <span style={{fontSize:10,color:'#888'}}>🔒 from Inventory</span>
+      </div>
+      <div style={{fontSize:10,color:'#888',marginTop:4}}>{note||'Add stock in the Inventory tab. This number is the total of all batches.'}</div>
+    </div>
+  );
+}
+
 // ==================== Editing ====================
 
 // In BULK mode a field does nothing until you tick it. That's the whole point:
@@ -1831,7 +1848,6 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
       if(on.gw)    patch.gross_weight  = +f.gw    || 0;
       if(on.sp)    patch.selling_price = +f.sp    || 0;
       if(on.cp)    patch.cost_price    = +f.cp    || 0;
-      if(on.stock) patch.stock         = +f.stock || 0;
       if(on.disc){ patch.discount = +f.disc || 0; patch.on_offer = (+f.disc||0) > 0; }
       if(on.bs)    patch.best_seller   = !!f.bs;
       if(on.isNew) patch.is_new        = !!f.isNew;
@@ -1844,6 +1860,8 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
         ...f, pw:+f.pw, gw:+f.gw, sp:+f.sp, cp:+f.cp||0,
         stock:+f.stock||0, disc:+f.disc||0, offer:(+f.disc||0)>0,
       }));
+      // Stock is derived from inventory by the database — never overwrite it here.
+      delete patch.stock;
     }
     setBusy(true);
     // .select() makes the database report what it actually changed, rather than us
@@ -1878,7 +1896,7 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
         {W('gw',   'Gross Weight (KG)',   <FInput label={bulk?'':'Gross Weight (KG)'}   value={f.gw}    onChange={v=>set('gw',v)}    type="number" req={!bulk}/>)}
         {W('sp',   'Selling Price (RMB)', <FInput label={bulk?'':'Selling Price (RMB)'} value={f.sp}    onChange={v=>set('sp',v)}    type="number" req={!bulk}/>)}
         {W('cp',   'Cost Price (RMB)',    <FInput label={bulk?'':'Cost Price (RMB)'}    value={f.cp}    onChange={v=>set('cp',v)}    type="number"/>)}
-        {W('stock','Stock Quantity',      <FInput label={bulk?'':'Stock Quantity'}      value={f.stock} onChange={v=>set('stock',v)} type="number"/>)}
+        {!bulk && <StockReadout value={f.stock} note={`Total across all inventory batches for ${one.name}. Change it by adding or editing batches in the Inventory tab.`}/>}
         {W('disc', 'Discount (%)',        <FInput label={bulk?'':'Discount (%)'}        value={f.disc}  onChange={v=>set('disc',v)}  type="number"/>)}
         {bulk&&W('bs',    '⭐ Best Seller',  <FSel label="" value={f.bs?'yes':'no'}    onChange={v=>set('bs',    v==='yes')} options={YN}/>)}
         {bulk&&W('isNew', '✨ New Arrival',  <FSel label="" value={f.isNew?'yes':'no'} onChange={v=>set('isNew', v==='yes')} options={YN}/>)}
@@ -1922,7 +1940,7 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
 }
 
 // Edit one inventory batch, or many at once.
-function InvEditOverlay({items,cats,prods,setProds,onClose,onSaved}) {
+function InvEditOverlay({items,cats,prods,setProds,onClose,onSaved,reloadProducts}) {
   const bulk = items.length > 1;
   const one  = items[0];
   const [on,setOn]     = useState({});
@@ -1981,18 +1999,8 @@ function InvEditOverlay({items,cats,prods,setProds,onClose,onSaved}) {
     if(error){ setBusy(false); alert('Could not save:\n\n'+error.message); return; }
     if(!data||data.length===0){ setBusy(false); alert('The database updated 0 rows. Check your admin permissions.'); return; }
 
-    // Move the stock counters to match.
-    for(const name of Object.keys(deltas)){
-      const d = deltas[name];
-      if(!d) continue;
-      const prod = prods.find(p=>p.name===name);
-      if(!prod) continue;
-      const newStock = Math.max(0, (prod.stock||0) + d);
-      const { error: sErr } = await supabase.from('products').update({stock:newStock}).eq('id',prod.id);
-      if(sErr){ alert(`The batch was saved, but the stock count for "${name}" could not be updated:\n\n${sErr.message}`); continue; }
-      setProds(p=>p.map(x=>x.id===prod.id?{...x,stock:newStock}:x));
-    }
-
+    // Editing a batch's quantity moves stock automatically through the trigger.
+    if(reloadProducts) await reloadProducts();
     setBusy(false);
     onSaved(data.map(fromDbInv));
     onClose();
@@ -2092,7 +2100,10 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
     if(!np.img){alert('Please upload a product picture');return;}
     if(imgBusy){alert('Please wait for the image to finish uploading.');return;}
     const draft={...np,pw:+np.pw,gw:+np.gw,sp:+np.sp,cp:+np.cp||0,stock:+np.stock||0,disc:+np.disc||0,offer:+np.disc>0,bs:false,isNew:true};
-    const { data, error } = await supabase.from('products').insert(toDbProduct(draft)).select().single();
+    // Stock is owned by inventory; a new product starts empty and is raised by
+    // adding batches. Force 0 here so the form can't set an out-of-thin-air number.
+    const dbProduct = { ...toDbProduct(draft), stock: 0 };
+    const { data, error } = await supabase.from('products').insert(dbProduct).select().single();
     if(error){alert('Failed to save product: '+error.message);return;}
     setProds(p=>[...p, fromDbProduct(data)]);
     setNp({name:'',upc:'',cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:0,disc:0,img:''});setShowAdd(false);
@@ -2230,7 +2241,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
             <FInput label="Gross Weight (KG) *" value={np.gw} onChange={v=>setNp(p=>({...p,gw:v}))} type="number" req/>
             <FInput label="Selling Price (RMB) *" value={np.sp} onChange={v=>setNp(p=>({...p,sp:v}))} type="number" req/>
             <FInput label="Cost Price (RMB)" value={np.cp} onChange={v=>setNp(p=>({...p,cp:v}))} type="number"/>
-            <FInput label="Stock Quantity (PCS)" value={np.stock} onChange={v=>setNp(p=>({...p,stock:v}))} type="number"/>
+            <StockReadout value={0} note="New products start at 0. Add an inventory batch to set the stock."/>
             <FInput label="Discount (%)" value={np.disc} onChange={v=>setNp(p=>({...p,disc:v}))} type="number"/>
           </div>
           <div style={{marginTop:6,marginBottom:6}}>
@@ -2254,7 +2265,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
   );
 }
 
-function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
+function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv,reloadProducts}) {
   const [q,setQ]=useState('');
   const [sel,setSel]=useState([]);
   const [showAdd,setShowAdd]=useState(false);
@@ -2282,15 +2293,9 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
     if(error){alert('Failed to save inventory item: '+error.message);return;}
     const item=fromDbInv(data);
     setInv(p=>[...p,item]);
-    if(matchedProd){
-      // INCREMENT, don't recompute from inventory batches.
-      // products.stock is now the authoritative counter: adding inventory raises it,
-      // a customer order lowers it. Recomputing from batches used to silently wipe out
-      // every sale that had happened since the last restock.
-      const newStock=(matchedProd.stock||0)+item.qty;
-      const { error: upErr } = await supabase.from('products').update({stock:newStock}).eq('id',matchedProd.id);
-      if(!upErr) setProds(p=>p.map(x=>x.id===matchedProd.id?{...x,stock:newStock}:x));
-    }
+    // The database trigger has already recomputed products.stock from the batches.
+    // Re-pull products so the Product List shows the new total.
+    if(reloadProducts) await reloadProducts();
     setNi({name:'',cat:'',qty:'',exp:'',sp:'',cp:'',pw:'',upc:''});setSrch('');setShowAdd(false);
   }
   // ----- Fix 5: restore or permanently delete archived items -----
@@ -2318,16 +2323,8 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
       const restored=(newRows||[]).map(fromDbInv);
       setInv([...inv,...restored]);
 
-      // Add the restored quantity back onto each product's stock counter.
-      const byName={};
-      rows.forEach(r=>{ byName[r.name]=(byName[r.name]||0)+r.qty; });
-      for(const name of Object.keys(byName)){
-        const prod=prods.find(x=>x.name===name);
-        if(!prod) continue;
-        const newStock=(prod.stock||0)+byName[name];
-        const { error: upErr } = await supabase.from('products').update({stock:newStock}).eq('id',prod.id);
-        if(!upErr) setProds(p=>p.map(x=>x.id===prod.id?{...x,stock:newStock}:x));
-      }
+      // Stock recomputes itself from the restored batches via the trigger.
+      if(reloadProducts) await reloadProducts();
 
       const { error: delErr } = await supabase.from('inventory_archive').delete().in('id', archSel);
       if(delErr) console.error('Archive cleanup failed:', delErr.message);
@@ -2361,15 +2358,8 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
     const withIds=(archRows||[]).map(r=>({...r.original_data, archiveId:r.id}));
     setDelInv(p=>[...withIds,...p]);
     setInv(p=>p.filter(i=>!sel.includes(i.id)));
-    const byName={};
-    toRm.forEach(i=>{byName[i.name]=(byName[i.name]||0)+i.qty;});
-    for(const name of Object.keys(byName)){
-      const prod=prods.find(x=>x.name===name);
-      if(!prod) continue;
-      const newStock=Math.max(0,prod.stock-byName[name]);
-      await supabase.from('products').update({stock:newStock}).eq('id',prod.id);
-      setProds(p=>p.map(x=>x.id===prod.id?{...x,stock:newStock}:x));
-    }
+    // Removing batches lowers stock automatically through the trigger.
+    if(reloadProducts) await reloadProducts();
     setSel([]);setConf(null);
   }
   function tog(id){setSel(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);}
@@ -2457,7 +2447,7 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv}) {
           <div style={{fontSize:10,color:G.mut,marginTop:8}}>Restoring puts the batch back into inventory and adds its quantity to the product's stock. Deleting forever cannot be undone.</div>
         </Card>
       )}
-      {editing&&<InvEditOverlay items={editing} cats={cats} prods={prods} setProds={setProds} onClose={()=>setEditing(null)}
+      {editing&&<InvEditOverlay items={editing} cats={cats} prods={prods} setProds={setProds} reloadProducts={reloadProducts} onClose={()=>setEditing(null)}
         onSaved={updated=>{ setInv(p=>p.map(x=>{const u=updated.find(y=>y.id===x.id); return u||x;})); setSel([]); }}/>}
       {showAdd&&(
         <Overlay title="Add Inventory Item" onClose={()=>setShowAdd(false)} width={520}>
@@ -3249,7 +3239,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
          <TabErrorBoundary key={tab}>
           {tab==='dash'&&<DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes}/>}
           {tab==='prods'&&<ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/>}
-          {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv}/>}
+          {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
