@@ -1,5 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LineChart, Line } from "recharts";
+// recharts is loaded on demand inside the admin Dashboard (see DashTab) so that
+// customers  who never see a chart  don't download the whole charting library
+// (recharts + its d3 dependencies) as part of the initial page load.
 import { supabase } from './supabaseClient';
 
 const BANNER_TOP = "/banner-top.png";
@@ -1539,6 +1541,10 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
 }
 
 function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,qrCodes,setQrCodes}) {
+  // Load the charting library only when this tab actually renders. Vite splits
+  // this into its own chunk, so it never touches the customer-facing bundle.
+  const [RC,setRC]=useState(null);
+  useEffect(()=>{ let ok=true; import('recharts').then(m=>{ if(ok) setRC(m); }); return ()=>{ ok=false; }; },[]);
   const lowStock=prods.filter(p=>p.stock<3);
   const outStock=prods.filter(p=>p.stock<=0);
   const expiring=inv.filter(i=>{const d=(new Date(i.exp)-new Date())/86400000;return d>0&&d<90;});
@@ -1752,19 +1758,23 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
         <div style={{fontWeight:'bold',fontSize:14,marginBottom:4,color:G.dk}}>📈 Monthly Performance (RMB)</div>
         <div style={{fontSize:11,color:G.mut,marginBottom:12}}>Last 6 months, from your Sales List. Cost is calculated from each product's cost price.</div>
         {noSales&&<div style={{fontSize:12,color:G.yd,background:G.goldl,borderRadius:8,padding:10,marginBottom:12}}>No sales recorded yet — this chart will fill in as orders are completed.</div>}
-        <ResponsiveContainer width="100%" height={220}>
-          <BarChart data={monthly}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="m" fontSize={11}/><YAxis fontSize={11}/><Tooltip/><Legend/>
-            <Bar dataKey="sales" name="Sales" fill={G.gm}/><Bar dataKey="cost" name="Cost" fill="#EF9A9A"/><Bar dataKey="profit" name="Profit" fill={G.gold}/>
-          </BarChart>
-        </ResponsiveContainer>
+        {RC
+          ? <RC.ResponsiveContainer width="100%" height={220}>
+              <RC.BarChart data={monthly}><RC.CartesianGrid strokeDasharray="3 3"/><RC.XAxis dataKey="m" fontSize={11}/><RC.YAxis fontSize={11}/><RC.Tooltip/><RC.Legend/>
+                <RC.Bar dataKey="sales" name="Sales" fill={G.gm}/><RC.Bar dataKey="cost" name="Cost" fill="#EF9A9A"/><RC.Bar dataKey="profit" name="Profit" fill={G.gold}/>
+              </RC.BarChart>
+            </RC.ResponsiveContainer>
+          : <div style={{height:220,display:'flex',alignItems:'center',justifyContent:'center',color:G.mut,fontSize:12}}>Loading chart</div>}
       </Card>
       <Card style={{marginBottom:18}}>
         <div style={{fontWeight:'bold',fontSize:14,marginBottom:14,color:G.dk}}>🚚 Courier Cost by Month (¥)</div>
-        <ResponsiveContainer width="100%" height={180}>
-          <LineChart data={monthly}><CartesianGrid strokeDasharray="3 3"/><XAxis dataKey="m" fontSize={11}/><YAxis fontSize={11}/><Tooltip/>
-            <Line type="monotone" dataKey="courier" name="Courier" stroke={G.bd} strokeWidth={2} dot={{fill:G.bd}}/>
-          </LineChart>
-        </ResponsiveContainer>
+        {RC
+          ? <RC.ResponsiveContainer width="100%" height={180}>
+              <RC.LineChart data={monthly}><RC.CartesianGrid strokeDasharray="3 3"/><RC.XAxis dataKey="m" fontSize={11}/><RC.YAxis fontSize={11}/><RC.Tooltip/>
+                <RC.Line type="monotone" dataKey="courier" name="Courier" stroke={G.bd} strokeWidth={2} dot={{fill:G.bd}}/>
+              </RC.LineChart>
+            </RC.ResponsiveContainer>
+          : <div style={{height:180,display:'flex',alignItems:'center',justifyContent:'center',color:G.mut,fontSize:12}}>Loading chart</div>}
       </Card>
       <Card style={{marginBottom:18}}>
         <div style={{fontWeight:'bold',fontSize:14,marginBottom:12,color:G.dk}}>⭐ Top Products</div>
