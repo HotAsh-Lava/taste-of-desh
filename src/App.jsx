@@ -5,9 +5,9 @@ import { supabase } from './supabaseClient';
 // customer visiting the storefront never downloads any of the admin code.
 const AdminApp = React.lazy(() => import('./AdminApp.jsx'));
 
-const BANNER_TOP = "/banner-top.png";
-const BANNER_SHOPNOW = "/banner-shopnow.png";
-const LOGO_MAIN = "/logo.png";
+const BANNER_TOP = "/banner-top.webp";
+const BANNER_SHOPNOW = "/banner-shopnow.webp";
+const LOGO_MAIN = "/logo.webp";
 const WECHAT_QR = "/wechat-qr.jpg";
 
 // Fix 1: force light color-scheme so browser dark-mode doesn't turn
