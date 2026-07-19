@@ -1624,7 +1624,7 @@ function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrder
           </div>
         )}
       </div>
-      <div style={{paddingBottom:68}}>
+      <div style={{paddingBottom:(cartN>0&&tab!=='cart'&&tab!=='profile')?140:68}}>
         {tab==='home'&&<HomeTab products={prods} categories={cats} addToCart={addToCart} setTab={setTab} t={t} customSlides={customSlides} catColors={catColors}/>}
         {tab==='categories'&&<CatTab products={prods} categories={cats} addToCart={addToCart} t={t}/>}
         {tab==='cart'&&<CartTab cart={cart} prods={prods} rawTotal={rawTotal} discTotal={discTotal} hasDsc={hasDsc} totalGW={totalGW} courierFee={courierFee} grandTotal={grandTotal} upd={upd} rm={rm} setCO={setCO} t={t} auth={auth} onRequireLogin={requireLogin}/>}
