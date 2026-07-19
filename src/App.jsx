@@ -94,7 +94,9 @@ const ISALES = [
 ];
 
 export const ep = p => p.offer && p.disc > 0 ? +(p.sp*(1-p.disc/100)).toFixed(2) : p.sp;
-export const cf = kg => kg > 0 ? Math.max(1, Math.ceil(kg)) * 5 : 0;
+// Courier: flat 5 RMB up to 1 kg, then exact total weight x 5 RMB above 1 kg
+// (e.g. 2.17 kg -> 10.85). Rounded to 2 decimals so stored/displayed values are clean.
+export const cf = kg => kg > 0 ? Math.round((kg <= 1 ? 5 : kg * 5) * 100) / 100 : 0;
 export const bjDate = () => new Date().toISOString().split('T')[0];
 export const bjTime = () => new Date().toLocaleTimeString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
 export const nid = arr => arr.length > 0 ? Math.max(...arr.map(x=>x.id))+1 : 1;
@@ -430,6 +432,13 @@ export function Slideshow({slides,addToCart}) {
     const t=setInterval(()=>setIdx(i=>(i+1)%slides.length),4200);
     return ()=>clearInterval(t);
   },[slides.length]);
+  // Warm the next slide's image so it's already cached when it rotates in.
+  useEffect(()=>{
+    if(slides.length<2) return;
+    const nx=slides[(idx+1)%slides.length];
+    const url=nx&&(nx.img||(nx.product&&nx.product.img));
+    if(url){ const im=new Image(); im.src=url; }
+  },[idx,slides]);
   if(slides.length===0) return null;
   const s=slides[Math.min(idx,slides.length-1)];
   const bgMap={offer:`linear-gradient(135deg,#B71C1C,#E53935)`,fresh:`linear-gradient(135deg,#0D47A1,#1E88E5)`,best:G.grad,custom:'#1E241F'};
@@ -529,7 +538,7 @@ function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}
             <div style={{color:G.g,fontSize:12,cursor:'pointer',fontWeight:'bold'}} onClick={()=>setTab('categories')}>{t('viewAll')} →</div>
           </div>
           <div style={{display:'flex',gap:12,overflowX:'auto',paddingBottom:8}}>
-            {offers.map(p=><div key={p.id} style={{flexShrink:0,width:150}}><PCard p={p} addToCart={addToCart}/></div>)}
+            {offers.slice(0,8).map(p=><div key={p.id} style={{flexShrink:0,width:150}}><PCard p={p} addToCart={addToCart}/></div>)}
           </div>
         </div>
       )}
@@ -539,7 +548,7 @@ function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}
           <div style={{color:G.g,fontSize:12,cursor:'pointer',fontWeight:'bold'}} onClick={()=>setTab('categories')}>{t('viewAll')} →</div>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
-          {bs.map(p=><PCard key={p.id} p={p} addToCart={addToCart}/>)}
+          {bs.slice(0,8).map(p=><PCard key={p.id} p={p} addToCart={addToCart}/>)}
         </div>
       </div>
     </div>
