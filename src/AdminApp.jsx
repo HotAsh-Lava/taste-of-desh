@@ -35,7 +35,10 @@ import {
   findProductForBatch,
   toDbSale,
   fromDbPO,
-  toDbPO
+  toDbPO,
+  removeBackground,
+  uploadToBucket,
+  optimizeImage
 } from './App.jsx';
 
 function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,qrCodes,setQrCodes}) {
@@ -362,8 +365,9 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
     const file=e.target.files[0]; if(!file) return;
     setImgBusy(true);
     try{
-      let up=file;
-      if(cutBg){ const r=await removeBackground(file); up=r.file; }
+      let up=file, transparent=false;
+      if(cutBg){ const r=await removeBackground(file); up=r.file; transparent=r.removed; }
+      up=await optimizeImage(up,{maxDim:1000,quality:0.9,transparent});
       set('img', await uploadToBucket('product-images', up));
     }catch(err){ alert(err.message); }
     finally{ setImgBusy(false); e.target.value=''; }
@@ -612,14 +616,16 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
     const f=e.target.files[0]; if(!f) return;
     setImgBusy(true); setImgNote('');
     try{
-      let file=f, note='';
+      let file=f, note='', transparent=false;
       if(cutBg){
         const res=await removeBackground(f);
         file=res.file;
+        transparent=res.removed;
         note=res.removed
           ? 'Background removed. The product will sit cleanly on any colour.'
           : 'No plain backdrop was found, so the photo was uploaded unchanged.';
       }
+      file=await optimizeImage(file,{maxDim:1000,quality:0.9,transparent});
       const url=await uploadToBucket('product-images', file);
       setNp(p=>({...p,img:url}));
       setImgNote(note);
