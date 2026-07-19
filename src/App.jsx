@@ -472,7 +472,7 @@ function HomeTab({products,categories,addToCart,setTab,t,customSlides}) {
   const bs = products.filter(p=>p.bs&&p.stock>0);
   const offers = products.filter(p=>p.offer&&p.stock>0);
   const slides = useMemo(()=>{
-    const cS=(customSlides||[]).map(c=>({kind:'custom',img:c.img,caption:c.caption}));
+    const cS=(customSlides||[]).map(c=>({kind:'custom',img:cdnImage(c.img),caption:c.caption}));
     const oS=offers.slice(0,3).map(p=>({kind:'offer',product:p}));
     const nS=products.filter(p=>p.isNew&&p.stock>0).slice(0,2).map(p=>({kind:'fresh',product:p}));
     const bS=bs.slice(0,3).map(p=>({kind:'best',product:p}));
@@ -661,7 +661,7 @@ export const CHECKER = {
 //
 // Returns { file, removed }. If the photo has no clean backdrop, it hands the
 // original straight back rather than destroying it.
-async function removeBackground(file, tolerance = 34) {
+export async function removeBackground(file, tolerance = 34) {
   const img = await new Promise((res, rej) => {
     const i = new Image();
     i.onload  = () => res(i);
@@ -776,18 +776,61 @@ async function removeBackground(file, tolerance = 34) {
   return { file: new File([blob], base + '.png', { type: 'image/png' }), removed: true };
 }
 
+// ==================== Image optimiser (resize + WebP) ====================
+// Shrinks an uploaded photo to a sensible pixel size and re-encodes it as WebP,
+// which is a fraction of the size of the original JPEG/PNG at the same visual
+// quality. This runs entirely in the browser BEFORE upload, so what lands in
+// Storage  and therefore what every customer downloads  is already small.
+// Falls back to PNG/JPEG on the rare browser that can't encode WebP.
+export async function optimizeImage(file, { maxDim = 1000, quality = 0.9, transparent = false } = {}) {
+  if (!file || !file.type || !file.type.startsWith('image/')) return file;
+  // Don't rasterise vector art or flatten animated GIFs.
+  if (file.type === 'image/gif' || file.type === 'image/svg+xml') return file;
+
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload  = () => res(i);
+    i.onerror = () => rej(new Error('That image could not be read.'));
+    i.src = URL.createObjectURL(file);
+  });
+
+  const scale = Math.min(1, maxDim / Math.max(img.width, img.height));   // only ever shrink
+  const w = Math.max(1, Math.round(img.width  * scale));
+  const h = Math.max(1, Math.round(img.height * scale));
+
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  if (!transparent) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h); }  // flatten alpha to white
+  ctx.drawImage(img, 0, 0, w, h);
+  URL.revokeObjectURL(img.src);
+
+  const encode = (type, q) => new Promise(res => cv.toBlob(res, type, q));
+  let blob = await encode('image/webp', quality);
+  let ext  = 'webp';
+  if (!blob || blob.type !== 'image/webp') {          // browser can't do WebP  fall back
+    if (transparent) { blob = await encode('image/png');          ext = 'png'; }
+    else             { blob = await encode('image/jpeg', quality); ext = 'jpg'; }
+  }
+  if (!blob) return file;                              // give up gracefully
+  if (blob.size >= file.size) return file;             // never upload something larger
+
+  const base = (file.name || 'image').replace(/\.[^.]+$/, '');
+  return new File([blob], base + '.' + ext, { type: blob.type });
+}
+
 // ==================== Supabase Storage upload helper ====================
 // Uploads a File to a public Storage bucket and returns its public URL.
 // This is what replaces storing base64 image data inside the database —
 // base64 made every product row enormous and slowed down every page load.
-async function uploadToBucket(bucket, file, folder='') {
+export async function uploadToBucket(bucket, file, folder='') {
   if(!file) return '';
   if(!file.type || !file.type.startsWith('image/')) throw new Error('Please choose an image file (JPG or PNG).');
   if(file.size > 5*1024*1024) throw new Error('That image is larger than 5MB. Please choose a smaller one.');
   const ext = ((file.name || '').split('.').pop() || 'jpg').toLowerCase().replace(/[^a-z0-9]/g,'') || 'jpg';
   const path = `${folder ? folder + '/' : ''}${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
   const { error } = await supabase.storage.from(bucket)
-    .upload(path, file, { cacheControl:'3600', upsert:false, contentType:file.type });
+    .upload(path, file, { cacheControl:'31536000', upsert:false, contentType:file.type });
   if(error) throw new Error('Upload failed: ' + error.message);
   const { data } = supabase.storage.from(bucket).getPublicUrl(path);
   return data.publicUrl;
@@ -806,6 +849,36 @@ async function fetchProfile(userId) {
 }
 
 // ==================== Stage 4: Supabase <-> UI field mapping helpers ====================
+
+// Product images live in Supabase Storage (Singapore) but are served to shoppers
+// through a Cloudflare Worker on our own subdomain, which caches them at
+// Cloudflare's edge instead of hitting Singapore on every view. We keep the raw
+// Supabase URL in the database (so nothing breaks if the CDN ever changes) and
+// only swap in the CDN host when handing an image to the browser.
+const IMG_CDN    = 'https://cdn.groupbuy.trade';
+const IMG_PUBLIC = '/storage/v1/object/public';   // the Supabase public-storage path segment
+
+// DB (raw Supabase) -> display (Cloudflare CDN). Leaves non-Supabase URLs untouched.
+function cdnImage(url){
+  if(!url) return url;
+  const i = url.indexOf(IMG_PUBLIC);
+  if(i === -1) return url;
+  if(!/^https:\/\/[a-z0-9-]+\.supabase\.co/i.test(url)) return url;
+  return IMG_CDN + url.slice(i + IMG_PUBLIC.length);
+}
+// Display (CDN) -> DB (raw Supabase), so the database always stores the canonical
+// storage URL. Rebuilt via the Supabase client, so there's no project ref to hardcode.
+function rawImage(url){
+  if(!url || !url.startsWith(IMG_CDN + '/')) return url;
+  const rel = url.slice(IMG_CDN.length + 1);        // e.g. product-images/1699-ab12.webp
+  const slash = rel.indexOf('/');
+  if(slash === -1) return url;
+  const bucket = rel.slice(0, slash);
+  const key    = rel.slice(slash + 1);
+  try { return supabase.storage.from(bucket).getPublicUrl(key).data.publicUrl; }
+  catch { return url; }
+}
+
 // Products
 export function fromDbProduct(row) {
   return {
@@ -813,7 +886,7 @@ export function fromDbProduct(row) {
     unit: row.unit || 'PCS', pw: row.pack_weight, gw: row.gross_weight,
     sp: row.selling_price, cp: row.cost_price || 0, stock: row.stock || 0,
     disc: row.discount || 0, offer: !!row.on_offer, bs: !!row.best_seller,
-    isNew: !!row.is_new, img: row.image_url || '',
+    isNew: !!row.is_new, img: cdnImage(row.image_url || ''),
   };
 }
 export function toDbProduct(p) {
@@ -821,7 +894,7 @@ export function toDbProduct(p) {
     name: p.name, upc: p.upc || null, category: p.cat, unit: p.unit || 'PCS',
     pack_weight: p.pw, gross_weight: p.gw, selling_price: p.sp, cost_price: p.cp || 0,
     stock: p.stock || 0, discount: p.disc || 0, on_offer: !!p.offer,
-    best_seller: !!p.bs, is_new: !!p.isNew, image_url: p.img || null,
+    best_seller: !!p.bs, is_new: !!p.isNew, image_url: rawImage(p.img) || null,
   };
 }
 // Inventory
@@ -1333,7 +1406,7 @@ function Checkout({step,setStep,info,setInfo,addrs,cart,rawTotal,discTotal,hasDs
               <div style={{fontWeight:'bold',fontSize:15,marginBottom:12}}>{method==='alipay'?'💙 '+t('scanWithAlipay'):'💚 '+t('scanWithWechat')}</div>
               <div style={{display:'inline-block',background:G.w,padding:14,borderRadius:12,boxShadow:'0 2px 10px rgba(0,0,0,0.1)',marginBottom:10}}>
                 {qrCodes && qrCodes[method] ? (
-                  <img src={qrCodes[method]} alt={method+' QR code'} style={{width:160,height:160,objectFit:'contain',borderRadius:8,display:'block'}}/>
+                  <img src={cdnImage(qrCodes[method])} alt={method+' QR code'} style={{width:160,height:160,objectFit:'contain',borderRadius:8,display:'block'}}/>
                 ) : (
                 <div style={{width:160,height:160,background:method==='alipay'?'#1677FF':'#07C160',borderRadius:8,display:'flex',alignItems:'center',justifyContent:'center'}}>
                   <div style={{background:G.w,borderRadius:8,padding:'10px 14px',textAlign:'center'}}>
