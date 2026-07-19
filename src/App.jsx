@@ -412,6 +412,17 @@ function PCard({p,addToCart}) {
   );
 }
 
+// Lighten (amt>0) or darken (amt<0) a hex colour; amt ranges -1..1.
+// Used to turn a flat category colour into a pleasant slide gradient.
+function shade(hex, amt){
+  const h=(hex||'#888888').replace('#','');
+  const n=h.length===3 ? h.split('').map(c=>c+c).join('') : h;
+  const ch=(i)=>parseInt(n.slice(i,i+2),16)||0;
+  const mix=(c)=> amt<0 ? c*(1+amt) : c+(255-c)*amt;
+  const to=(c)=>Math.max(0,Math.min(255,Math.round(mix(c)))).toString(16).padStart(2,'0');
+  return '#'+to(ch(0))+to(ch(2))+to(ch(4));
+}
+
 export function Slideshow({slides,addToCart}) {
   const [idx,setIdx]=useState(0);
   useEffect(()=>{
@@ -424,7 +435,11 @@ export function Slideshow({slides,addToCart}) {
   const bgMap={offer:`linear-gradient(135deg,#B71C1C,#E53935)`,fresh:`linear-gradient(135deg,#0D47A1,#1E88E5)`,best:G.grad,custom:'#1E241F'};
   const tagMap={offer:'🔥 Limited Offer',fresh:'✨ New Arrival',best:'⭐ Best Seller',custom:'📣 Promotion'};
   return (
-    <div style={{position:'relative',borderRadius:18,overflow:'hidden',margin:'14px 16px 18px',height:172,background:bgMap[s.kind],color:'#fff',boxShadow:'0 6px 18px rgba(0,0,0,0.18)'}}>
+    <div style={{position:'relative',borderRadius:18,overflow:'hidden',margin:'14px 16px 18px',height:172,background:s.bg||bgMap[s.kind],color:'#fff',boxShadow:'0 6px 18px rgba(0,0,0,0.18)'}}>
+      {s.kind==='category' && s.product.img && (<>
+        <img src={s.product.img} aria-hidden="true" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover',filter:'blur(20px) brightness(0.55)',transform:'scale(1.2)'}}/>
+        <div style={{position:'absolute',inset:0,background:s.bg,opacity:0.7}}/>
+      </>)}
       {s.kind==='custom' ? (
         <>
           {/* blurred, zoomed copy fills the box so any aspect ratio looks intentional */}
@@ -445,7 +460,7 @@ export function Slideshow({slides,addToCart}) {
               : <span style={{fontSize:46}}>{ICONS[s.product.cat]||'📦'}</span>}
           </div>
           <div style={{flex:1,minWidth:0}}>
-            <div style={{background:'rgba(255,255,255,0.22)',display:'inline-block',borderRadius:8,padding:'2px 9px',fontSize:11,fontWeight:'bold',marginBottom:6}}>{tagMap[s.kind]}</div>
+            <div style={{background:'rgba(255,255,255,0.22)',display:'inline-block',borderRadius:8,padding:'2px 9px',fontSize:11,fontWeight:'bold',marginBottom:6}}>{s.tag||tagMap[s.kind]}</div>
             <div style={{fontWeight:'bold',fontSize:15,marginBottom:4,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{s.product.name}</div>
             <div style={{display:'flex',alignItems:'center',gap:8}}>
               {s.product.offer&&<span style={{textDecoration:'line-through',opacity:0.7,fontSize:12}}>¥{s.product.sp}</span>}
@@ -468,16 +483,35 @@ export function Slideshow({slides,addToCart}) {
   );
 }
 
-function HomeTab({products,categories,addToCart,setTab,t,customSlides}) {
+function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}) {
   const bs = products.filter(p=>p.bs&&p.stock>0);
   const offers = products.filter(p=>p.offer&&p.stock>0);
   const slides = useMemo(()=>{
+    // Admin-uploaded promo slides always lead.
     const cS=(customSlides||[]).map(c=>({kind:'custom',img:cdnImage(c.img),caption:c.caption}));
-    const oS=offers.slice(0,3).map(p=>({kind:'offer',product:p}));
-    const nS=products.filter(p=>p.isNew&&p.stock>0).slice(0,2).map(p=>({kind:'fresh',product:p}));
-    const bS=bs.slice(0,3).map(p=>({kind:'best',product:p}));
-    return [...cS,...oS,...nS,...bS];
-  },[products,customSlides]);
+
+    // One standout in-stock product per category, each on its own category-coloured
+    // backdrop, so the carousel showcases the whole range at a glance.
+    const used=new Set();
+    const catS=(categories||[]).map(cat=>{
+      const inCat=products.filter(p=>p.cat===cat && p.stock>0);
+      if(!inCat.length) return null;
+      const pick=inCat.find(p=>!p.bs&&!p.isNew)||inCat[0];
+      used.add(pick.id);
+      const col=(catColors&&catColors[cat])||G.gm;
+      return {
+        kind:'category', product:pick,
+        bg:`linear-gradient(135deg, ${shade(col,0.10)}, ${shade(col,-0.38)})`,
+        tag:`${ICONS[cat]||'🏷️'} ${cat}`,
+      };
+    }).filter(Boolean);
+
+    // Then a New Arrival and a Best Seller, skipping anything already shown above.
+    const nS=products.filter(p=>p.isNew&&p.stock>0&&!used.has(p.id)).slice(0,1).map(p=>({kind:'fresh',product:p}));
+    const bS=bs.filter(p=>!used.has(p.id)).slice(0,1).map(p=>({kind:'best',product:p}));
+
+    return [...cS,...catS,...nS,...bS];
+  },[products,categories,customSlides,catColors]);
   return (
     <div>
       <div style={{lineHeight:0}}>
@@ -1469,7 +1503,7 @@ function Checkout({step,setStep,info,setInfo,addrs,cart,rawTotal,discTotal,hasDs
   );
 }
 
-function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,lang,setLang,auth,setAuth,customSlides,qrCodes,onOrdersChanged,reloadProducts}) {
+function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrders,setCart,lang,setLang,auth,setAuth,customSlides,qrCodes,onOrdersChanged,reloadProducts}) {
   const [tab,setTab] = useState('home');
   const [coStep,setCO] = useState(null);
   const [info,setInfo] = useState({name:'',mob:'',addr:''});
@@ -1586,7 +1620,7 @@ function CustomerApp({prods,cats,cart,addToCart,rm,upd,orders,setOrders,setCart,
         )}
       </div>
       <div style={{paddingBottom:68}}>
-        {tab==='home'&&<HomeTab products={prods} categories={cats} addToCart={addToCart} setTab={setTab} t={t} customSlides={customSlides}/>}
+        {tab==='home'&&<HomeTab products={prods} categories={cats} addToCart={addToCart} setTab={setTab} t={t} customSlides={customSlides} catColors={catColors}/>}
         {tab==='categories'&&<CatTab products={prods} categories={cats} addToCart={addToCart} t={t}/>}
         {tab==='cart'&&<CartTab cart={cart} prods={prods} rawTotal={rawTotal} discTotal={discTotal} hasDsc={hasDsc} totalGW={totalGW} courierFee={courierFee} grandTotal={grandTotal} upd={upd} rm={rm} setCO={setCO} t={t} auth={auth} onRequireLogin={requireLogin}/>}
         {tab==='profile'&&<ProfileTab addrs={addrs} setAddrs={setAddrs} orders={myOrders} auth={auth} setAuth={setAuth} lang={lang} setLang={setLang} t={t}/>}
@@ -1840,7 +1874,7 @@ export default function App() {
   return(
     <div style={{fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',minHeight:'100vh'}}>
       {view==='customer'
-        ?<CustomerApp prods={prods} cats={cats} cart={cart} addToCart={addToCart} rm={rm} upd={upd} orders={orders} setOrders={setOrders} setCart={setCart} lang={lang} setLang={setLang} auth={auth} setAuth={setAuth} customSlides={customSlides} qrCodes={qrCodes} onOrdersChanged={loadOrders} reloadProducts={reloadProducts}/>
+        ?<CustomerApp prods={prods} cats={cats} catColors={catColors} cart={cart} addToCart={addToCart} rm={rm} upd={upd} orders={orders} setOrders={setOrders} setCart={setCart} lang={lang} setLang={setLang} auth={auth} setAuth={setAuth} customSlides={customSlides} qrCodes={qrCodes} onOrdersChanged={loadOrders} reloadProducts={reloadProducts}/>
         :(auth.loggedIn && auth.user?.role==='admin'
             ?<React.Suspense fallback={<div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:G.mut}}>Loading admin</div>}><AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes} reloadProducts={reloadProducts} reloadInventory={reloadInventory} onLogout={async()=>{await supabase.auth.signOut();setAuth({loggedIn:false,user:null});}}/></React.Suspense>
             :<AdminLogin onLogin={(u)=>setAuth({loggedIn:true,user:u})}/>
