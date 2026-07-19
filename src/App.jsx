@@ -436,10 +436,6 @@ export function Slideshow({slides,addToCart}) {
   const tagMap={offer:'🔥 Limited Offer',fresh:'✨ New Arrival',best:'⭐ Best Seller',custom:'📣 Promotion'};
   return (
     <div style={{position:'relative',borderRadius:18,overflow:'hidden',margin:'14px 16px 18px',height:172,background:s.bg||bgMap[s.kind],color:'#fff',boxShadow:'0 6px 18px rgba(0,0,0,0.18)'}}>
-      {s.kind==='category' && s.product.img && (<>
-        <img src={s.product.img} aria-hidden="true" style={{position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'cover',filter:'blur(20px) brightness(0.55)',transform:'scale(1.2)'}}/>
-        <div style={{position:'absolute',inset:0,background:s.bg,opacity:0.7}}/>
-      </>)}
       {s.kind==='custom' ? (
         <>
           {/* blurred, zoomed copy fills the box so any aspect ratio looks intentional */}
@@ -451,12 +447,12 @@ export function Slideshow({slides,addToCart}) {
         </>
       ) : (
         <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',padding:'0 18px',gap:14}}>
-          {/* No plate behind a real photo — with the backdrop stripped out, the product
-              sits directly on the gradient. drop-shadow (not box-shadow) follows the
-              alpha channel, so it traces the product's outline rather than a square. */}
-          <div style={{flexShrink:0,width:98,height:98,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',background:s.product.img?'transparent':'rgba(255,255,255,0.18)'}}>
+          {/* Product sits on a small white card so photos blend cleanly whether or
+              not their background was removed: a white-background photo merges into
+              the card instead of showing a hard edge against the coloured slide. */}
+          <div style={{flexShrink:0,width:98,height:98,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',overflow:'hidden',background:s.product.img?'#fff':'rgba(255,255,255,0.18)',boxShadow:s.product.img?'0 3px 10px rgba(0,0,0,0.28)':'none'}}>
             {s.product.img
-              ? <img src={s.product.img} alt={s.product.name} style={{width:'100%',height:'100%',objectFit:'contain',filter:'drop-shadow(0 3px 8px rgba(0,0,0,0.35))'}}/>
+              ? <img src={s.product.img} alt={s.product.name} style={{maxWidth:'84%',maxHeight:'84%'}}/>
               : <span style={{fontSize:46}}>{ICONS[s.product.cat]||'📦'}</span>}
           </div>
           <div style={{flex:1,minWidth:0}}>
