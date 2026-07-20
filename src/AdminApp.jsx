@@ -355,10 +355,10 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
   const [imgBusy,setImgBusy] = useState(false);
   const [cutBg,setCutBg]   = useState(true);
   const [f,setF] = useState(bulk
-    ? {cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:'',disc:'',bs:false,isNew:false}
+    ? {cat:'',unit:'PCS',pw:'',gw:'',sp:'',cp:'',stock:'',disc:'',bs:false,isNew:false,slideshow:false}
     : {name:one.name, upc:one.upc||'', cat:one.cat||'', unit:one.unit||'PCS',
        pw:one.pw??'', gw:one.gw??'', sp:one.sp??'', cp:one.cp??'',
-       stock:one.stock??0, disc:one.disc??0, bs:!!one.bs, isNew:!!one.isNew, img:one.img||''});
+       stock:one.stock??0, disc:one.disc??0, bs:!!one.bs, isNew:!!one.isNew, slideshow:!!one.slideshow, img:one.img||''});
   const set = (k,v)=>setF(p=>({...p,[k]:v}));
 
   async function handleImg(e){
@@ -386,6 +386,7 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
       if(on.disc){ patch.discount = +f.disc || 0; patch.on_offer = (+f.disc||0) > 0; }
       if(on.bs)    patch.best_seller   = !!f.bs;
       if(on.isNew) patch.is_new        = !!f.isNew;
+      if(on.slideshow) patch.show_in_slideshow = !!f.slideshow;
       if(Object.keys(patch).length===0){ alert('Tick at least one field to change.'); return; }
     } else {
       if(!f.name||!f.cat||f.sp===''||f.pw===''||f.gw===''){
@@ -435,6 +436,7 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
         {W('disc', 'Discount (%)',        <FInput label={bulk?'':'Discount (%)'}        value={f.disc}  onChange={v=>set('disc',v)}  type="number"/>)}
         {bulk&&W('bs',    '⭐ Best Seller',  <FSel label="" value={f.bs?'yes':'no'}    onChange={v=>set('bs',    v==='yes')} options={YN}/>)}
         {bulk&&W('isNew', '✨ New Arrival',  <FSel label="" value={f.isNew?'yes':'no'} onChange={v=>set('isNew', v==='yes')} options={YN}/>)}
+        {bulk&&W('slideshow', '🖼️ Show in Slideshow', <FSel label="" value={f.slideshow?'yes':'no'} onChange={v=>set('slideshow', v==='yes')} options={YN}/>)}
       </div>
 
       <div style={{fontSize:10,color:G.mut,marginTop:-2,marginBottom:8}}>
@@ -444,12 +446,15 @@ function ProdEditOverlay({items,cats,onClose,onSaved}) {
 
       {!bulk&&(
         <>
-          <div style={{display:'flex',gap:20,margin:'4px 0 12px'}}>
+          <div style={{display:'flex',gap:20,margin:'4px 0 12px',flexWrap:'wrap'}}>
             <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,cursor:'pointer',color:G.tx}}>
               <input type="checkbox" checked={!!f.bs} onChange={e=>set('bs',e.target.checked)}/> ⭐ Best Seller
             </label>
             <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,cursor:'pointer',color:G.tx}}>
               <input type="checkbox" checked={!!f.isNew} onChange={e=>set('isNew',e.target.checked)}/> ✨ New Arrival
+            </label>
+            <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,cursor:'pointer',color:G.tx}}>
+              <input type="checkbox" checked={!!f.slideshow} onChange={e=>set('slideshow',e.target.checked)}/> 🖼️ Show in Slideshow
             </label>
           </div>
           <div style={{marginBottom:8}}>
@@ -751,7 +756,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
                   inventory still reference it. */}
               <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>{i+1}<div style={{fontSize:9,color:G.mut,fontWeight:'normal'}}>#{p.id}</div></td>
               <td style={{padding:'7px',textAlign:'center'}}>{p.img?<img src={p.img} alt={p.name} loading="lazy" decoding="async" style={{width:40,height:40,objectFit:'contain',borderRadius:6}}/>:<span style={{fontSize:24}}>{ICONS[p.cat]||'📦'}</span>}</td>
-              <td style={{padding:'7px'}}><div style={{fontWeight:'bold'}}>{p.name}</div>{p.offer&&<span style={{background:'#FFCDD2',color:'#B71C1C',borderRadius:4,padding:'1px 5px',fontSize:10,fontWeight:'bold'}}>On Offer</span>}</td>
+              <td style={{padding:'7px'}}><div style={{fontWeight:'bold'}}>{p.name}</div><div style={{display:'flex',gap:4,flexWrap:'wrap'}}>{p.offer&&<span style={{background:'#FFCDD2',color:'#B71C1C',borderRadius:4,padding:'1px 5px',fontSize:10,fontWeight:'bold'}}>On Offer</span>}{p.slideshow&&<span style={{background:'#D6E9FF',color:'#1565C0',borderRadius:4,padding:'1px 5px',fontSize:10,fontWeight:'bold'}}>🖼️ Slideshow</span>}</div></td>
               <td style={{padding:'7px',textAlign:'center',color:G.mut,fontSize:11}}>{p.upc||'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}><CatChip cat={p.cat} catColors={catColors}/></td>
               <td style={{padding:'7px',textAlign:'center'}}>{p.unit}</td>
