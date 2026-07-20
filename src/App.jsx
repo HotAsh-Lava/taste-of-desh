@@ -495,26 +495,29 @@ function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}
     // Admin-uploaded promo slides always lead.
     const cS=(customSlides||[]).map(c=>({kind:'custom',img:cdnImage(c.img),caption:c.caption}));
 
-    // One standout in-stock product per category, each on its own category-coloured
-    // backdrop, so the carousel showcases the whole range at a glance.
+    // Turn a product into a slide: its category colour as the backdrop, and a tag
+    // that reflects why it's notable (best seller / new / offer / its category).
+    const mkSlide=(p)=>{
+      const col=(catColors&&catColors[p.cat])||G.gm;
+      const tag=p.bs?'⭐ Best Seller':p.isNew?'✨ New Arrival':p.offer?'🏷️ Special Offer':`${ICONS[p.cat]||'🏷️'} ${p.cat}`;
+      return {kind:'category',product:p,bg:`linear-gradient(135deg, ${shade(col,0.10)}, ${shade(col,-0.38)})`,tag};
+    };
+
+    // If the admin has hand-picked products for the slideshow, show exactly those.
+    const chosen=products.filter(p=>p.slideshow&&p.stock>0);
+    if(chosen.length) return [...cS, ...chosen.map(mkSlide)];
+
+    // Fallback until any are picked: one item per category + a new arrival + a best seller.
     const used=new Set();
     const catS=(categories||[]).map(cat=>{
       const inCat=products.filter(p=>p.cat===cat && p.stock>0);
       if(!inCat.length) return null;
       const pick=inCat.find(p=>!p.bs&&!p.isNew)||inCat[0];
       used.add(pick.id);
-      const col=(catColors&&catColors[cat])||G.gm;
-      return {
-        kind:'category', product:pick,
-        bg:`linear-gradient(135deg, ${shade(col,0.10)}, ${shade(col,-0.38)})`,
-        tag:`${ICONS[cat]||'🏷️'} ${cat}`,
-      };
+      return mkSlide(pick);
     }).filter(Boolean);
-
-    // Then a New Arrival and a Best Seller, skipping anything already shown above.
-    const nS=products.filter(p=>p.isNew&&p.stock>0&&!used.has(p.id)).slice(0,1).map(p=>({kind:'fresh',product:p}));
-    const bS=bs.filter(p=>!used.has(p.id)).slice(0,1).map(p=>({kind:'best',product:p}));
-
+    const nS=products.filter(p=>p.isNew&&p.stock>0&&!used.has(p.id)).slice(0,1).map(mkSlide);
+    const bS=products.filter(p=>p.bs&&p.stock>0&&!used.has(p.id)).slice(0,1).map(mkSlide);
     return [...cS,...catS,...nS,...bS];
   },[products,categories,customSlides,catColors]);
   return (
@@ -926,6 +929,7 @@ export function fromDbProduct(row) {
     sp: row.selling_price, cp: row.cost_price || 0, stock: row.stock || 0,
     disc: row.discount || 0, offer: !!row.on_offer, bs: !!row.best_seller,
     isNew: !!row.is_new, img: cdnImage(row.image_url || ''),
+    slideshow: !!row.show_in_slideshow,
   };
 }
 export function toDbProduct(p) {
@@ -934,6 +938,7 @@ export function toDbProduct(p) {
     pack_weight: p.pw, gross_weight: p.gw, selling_price: p.sp, cost_price: p.cp || 0,
     stock: p.stock || 0, discount: p.disc || 0, on_offer: !!p.offer,
     best_seller: !!p.bs, is_new: !!p.isNew, image_url: rawImage(p.img) || null,
+    show_in_slideshow: !!p.slideshow,
   };
 }
 // Inventory
