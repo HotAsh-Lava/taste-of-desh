@@ -1715,9 +1715,13 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
   }
 
   const recent = useMemo(()=>{
-    if(!rq) return sales;
+    // Sales Invoice is for walk-in sales only. Completed online orders live in the
+    // Online Orders tab (→ Completed Orders), so they are deliberately kept out of
+    // this list to avoid confusion and double-handling.
+    const walkins = sales.filter(s=>s.type!=='online');
+    if(!rq) return walkins;
     const lq=rq.toLowerCase();
-    return sales.filter(s=>String(s.seq).includes(rq)||((s.oid||'').toLowerCase().includes(lq))||((s.cname||'').toLowerCase().includes(lq)));
+    return walkins.filter(s=>String(s.seq).includes(rq)||((s.oid||'').toLowerCase().includes(lq))||((s.cname||'').toLowerCase().includes(lq)));
   },[sales,rq]);
 
   return(
@@ -1826,7 +1830,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
   );
 }
 
-function SLTab({sales,setSales,reloadProducts,reloadInventory}) {
+function SLTab({sales,setSales,reloadProducts,reloadInventory,reloadOrders}) {
   const [q,setQ]=useState('');
   const [exp,setExp]=useState(new Set());
   const [sel,setSel]=useState([]);
@@ -1847,6 +1851,10 @@ function SLTab({sales,setSales,reloadProducts,reloadInventory}) {
     setSel([]);
     if(reloadProducts)  await reloadProducts();
     if(reloadInventory) await reloadInventory();
+    // Deleting a completed online order's sale also deletes the underlying order
+    // (handled by delete_sales in the DB), so re-pull orders to drop it from the
+    // Online Orders tab too. Walk-in invoices have no linked order — this is a no-op for them.
+    if(reloadOrders)    await reloadOrders();
   }
   return(
     <div>
@@ -1906,7 +1914,7 @@ function SLTab({sales,setSales,reloadProducts,reloadInventory}) {
   );
 }
 
-function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout,reloadProducts,reloadInventory}) {
+function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout,reloadProducts,reloadInventory,reloadOrders}) {
   const [tab,setTab]=useState('dash');
   const [open,setOpen]=useState(true);
   const tabs=[
@@ -1941,7 +1949,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
-          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
+          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
          </TabErrorBoundary>
         </div>
       </div>
