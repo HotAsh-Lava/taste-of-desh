@@ -1257,10 +1257,34 @@ function PLTab({pos,setPOs,inv,setInv,catColors}) {
   );
 }
 
-function OOTab({orders,setOrders,sales,setSales,inv,reloadProducts,reloadInventory}) {
+function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadInventory}) {
   const [conf,setConf]=useState(null);
   const [completing,setCompleting]=useState(null);   // { order, alloc:{ itemId:{ batchId:qty } } }
+  const [editing,setEditing]=useState(null);          // { orderId, items:[{pid,name,qty,up,gw,disc}] }
   const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
+
+  // ---- Editing a pending order's items (reservations only, no inventory yet) ----
+  function openEdit(o){ setEditing({orderId:o.id, items:o.items.map(i=>({pid:i.pid,name:i.name,qty:i.qty,up:i.up,gw:i.gw,disc:i.disc||0}))}); }
+  const setItemQty=(idx,qty)=>setEditing(e=>({...e,items:e.items.map((it,i)=>i===idx?{...it,qty:Math.max(1,+qty||1)}:it)}));
+  const removeItem=(idx)=>setEditing(e=>({...e,items:e.items.filter((_,i)=>i!==idx)}));
+  function addItem(pid){
+    const p=(prods||[]).find(x=>x.id===+pid); if(!p) return;
+    setEditing(e=>{
+      const ex=e.items.find(it=>it.pid===p.id);
+      if(ex) return {...e,items:e.items.map(it=>it.pid===p.id?{...it,qty:it.qty+1}:it)};
+      return {...e,items:[...e.items,{pid:p.id,name:p.name,qty:1,up:ep(p),gw:p.gw,disc:p.disc||0}]};
+    });
+  }
+  async function saveEdit(){
+    const e=editing;
+    if(!e.items.length){ alert('An order needs at least one item. Cancel the order instead if you want it empty.'); return; }
+    const p_items=e.items.map(i=>({product_id:i.pid, name:i.name, qty:i.qty, unit_price:i.up, gross_weight:i.gw, discount:i.disc||0}));
+    const { error }=await supabase.rpc('revise_order',{ p_order_id:e.orderId, p_items });
+    if(error){ alert('Could not save the changes:\n\n'+error.message); return; }
+    setOrders(p=>p.map(o=>o.id===e.orderId?{...o,items:e.items.map(i=>({pid:i.pid,name:i.name,qty:i.qty,up:i.up,gw:i.gw,disc:i.disc||0}))}:o));
+    setEditing(null);
+    if(reloadProducts) await reloadProducts();   // reservations changed
+  }
 
   // Physical batches available for an order line, soonest expiry first.
   const batchesFor=(item)=>(inv||[])
@@ -1351,6 +1375,34 @@ function OOTab({orders,setOrders,sales,setSales,inv,reloadProducts,reloadInvento
           </div>
         </Overlay>
       )}
+      {editing&&(()=>{
+        const sub=editing.items.reduce((s,i)=>s+i.up*i.qty,0);
+        return(
+          <Overlay title={`Edit items — ${editing.orderId}`} onClose={()=>setEditing(null)} width={600}>
+            <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Add, remove, or change quantities. Availability is checked when you save; stock isn't actually deducted until you complete the order.</div>
+            {editing.items.map((it,idx)=>(
+              <div key={idx} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:`1px dashed ${G.brd}`}}>
+                <span style={{flex:1,fontSize:13}}>{it.name}<div style={{fontSize:10,color:G.mut}}>¥{(+it.up).toFixed(2)} each</div></span>
+                <input type="number" min="1" value={it.qty} onChange={e=>setItemQty(idx,e.target.value)} style={{width:60,padding:'3px 6px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,textAlign:'center'}}/>
+                <span style={{width:72,textAlign:'right',fontSize:12,fontWeight:'bold'}}>¥{(it.up*it.qty).toFixed(2)}</span>
+                <button onClick={()=>removeItem(idx)} title="Remove" style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'2px 8px',cursor:'pointer',fontSize:11}}>✕</button>
+              </div>
+            ))}
+            <div style={{marginTop:10}}>
+              <select value="" onChange={e=>{ if(e.target.value){ addItem(e.target.value); } }} style={{width:'100%',padding:'6px 8px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}>
+                <option value="">+ Add a product…</option>
+                {(prods||[]).slice().sort((a,b)=>a.name.localeCompare(b.name)).map(p=><option key={p.id} value={p.id}>{p.name} — avail {p.avail}</option>)}
+              </select>
+            </div>
+            <div style={{display:'flex',justifyContent:'space-between',fontWeight:'bold',fontSize:14,marginTop:12,color:G.gd}}><span>Items subtotal</span><span>¥{sub.toFixed(2)}</span></div>
+            <div style={{fontSize:10,color:G.mut,marginTop:4}}>Courier and any custom discount stay as set on the order card.</div>
+            <div style={{display:'flex',gap:8,marginTop:12}}>
+              <Btn onClick={saveEdit}>💾 Save Changes</Btn>
+              <button onClick={()=>setEditing(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+            </div>
+          </Overlay>
+        );
+      })()}
       <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:4}}>🛒 Online Orders</div>
       <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Active: {active.length} · Cancelled: {orders.filter(o=>o.status==='cancelled').length} · Total: {orders.length}</div>
       {active.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No active orders</div></Card>:active.map(o=>{
@@ -1418,6 +1470,7 @@ function OOTab({orders,setOrders,sales,setSales,inv,reloadProducts,reloadInvento
             </div>
             <div style={{display:'flex',gap:8}}>
               <Btn onClick={()=>openComplete(o)}>✅ Complete Order</Btn>
+              <Btn v='info' sm onClick={()=>openEdit(o)}>✏️ Edit Items</Btn>
               <Btn v='danger' sm onClick={()=>setConf({msg:`Cancel order ${o.id}? The reserved stock will be released back to availability.`,yes:()=>cancelOrder(o)})}>Cancel</Btn>
             </div>
           </Card>
@@ -1837,7 +1890,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
-          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
+          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
          </TabErrorBoundary>
