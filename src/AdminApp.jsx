@@ -1826,7 +1826,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
   );
 }
 
-function SLTab({sales,setSales,reloadProducts}) {
+function SLTab({sales,setSales,reloadProducts,reloadInventory}) {
   const [q,setQ]=useState('');
   const [exp,setExp]=useState(new Set());
   const [sel,setSel]=useState([]);
@@ -1838,14 +1838,15 @@ function SLTab({sales,setSales,reloadProducts}) {
   function toggleAll(){ setSel(allSel ? [] : list.map(s=>s.id)); }
   async function deleteSelected(){
     if(!sel.length) return;
-    if(!window.confirm(`Delete ${sel.length} sales record(s)? Items from walk-in invoices will be returned to stock. This cannot be undone.`)) return;
-    // Goes through the database function so that walk-in invoices hand their
-    // stock back. Online sales don't — their stock was taken by the order itself.
+    if(!window.confirm(`Delete ${sel.length} sales record(s)? The items will be returned to stock. This cannot be undone.`)) return;
+    // The database function returns stock to inventory for any sale that took it
+    // (walk-in invoices and completed online orders alike).
     const { error } = await supabase.rpc('delete_sales', { p_ids: sel });
     if(error){alert('Failed to delete: '+error.message);return;}
     setSales(p=>p.filter(s=>!sel.includes(s.id)));
     setSel([]);
-    if(reloadProducts) await reloadProducts();
+    if(reloadProducts)  await reloadProducts();
+    if(reloadInventory) await reloadInventory();
   }
   return(
     <div>
@@ -1940,7 +1941,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
-          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
+          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
          </TabErrorBoundary>
         </div>
       </div>
