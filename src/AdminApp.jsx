@@ -764,7 +764,7 @@ function ProdTab({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,
               <td style={{padding:'7px',textAlign:'center'}}>{p.gw}</td>
               <td style={{padding:'7px',textAlign:'center'}}>{p.offer?<><div style={{textDecoration:'line-through',color:G.mut,fontSize:10}}>¥{p.sp}</div><div style={{color:'#B71C1C',fontWeight:'bold'}}>¥{ep(p).toFixed(2)}</div></>:<span>¥{p.sp}</span>}</td>
               <td style={{padding:'7px',textAlign:'center'}}>{p.cp?`¥${p.cp}`:'—'}</td>
-              <td style={{padding:'7px',textAlign:'center'}}><span style={{...stStyle(p.stock),padding:'2px 8px',borderRadius:5,display:'inline-block'}}>{p.stock}</span></td>
+              <td style={{padding:'7px',textAlign:'center'}}><span style={{...stStyle(p.stock),padding:'2px 8px',borderRadius:5,display:'inline-block'}}>{p.stock}</span>{p.reserved>0&&<div style={{fontSize:9,color:'#1565C0',fontWeight:'bold',marginTop:2}}>{p.reserved} reserved</div>}</td>
               <td style={{padding:'7px',textAlign:'center'}}>{p.disc>0?<span style={{color:'#B71C1C',fontWeight:'bold'}}>{p.disc}%</span>:'—'}</td>
               <td style={{padding:'7px',textAlign:'center'}}><button onClick={()=>setEditing([p])} title={`Edit ${p.name}`} style={{background:'none',border:'none',cursor:'pointer',fontSize:15,lineHeight:1}}>✏️</button></td>
             </tr>
@@ -1269,35 +1269,36 @@ function OOTab({orders,setOrders,sales,setSales,reloadProducts,reloadInventory})
     }).eq('id',o.id);
     if(error) console.error('syncOrder error:', error.message);
   }
-  // Cancelling returns the goods to BOTH places: the product's stock counter
-  // AND the Inventory tab (a fresh batch is created for each line, since the
-  // original batch rows were consumed when the order was placed).
+  // Cancelling a pending order just releases its reservation — the stock never
+  // left inventory, so there's nothing to put back, only reserved units to free.
   async function cancelOrder(o){
-    const { error: rpcErr } = await supabase.rpc('cancel_order_restore', { p_order_id: o.id });
-    if(rpcErr){ alert('Failed to return the stock: '+rpcErr.message); return; }
+    const { error: rpcErr } = await supabase.rpc('cancel_order_release', { p_order_id: o.id });
+    if(rpcErr){ alert('Failed to cancel the order: '+rpcErr.message); return; }
     const { error } = await supabase.from('orders').update({status:'cancelled'}).eq('id',o.id);
     if(error){ alert('Failed to cancel the order: '+error.message); return; }
     upd(o.id,'status','cancelled');
-    if(reloadProducts) await reloadProducts();
-    if(reloadInventory) await reloadInventory();   // pull the recreated batches into the table
+    if(reloadProducts) await reloadProducts();   // reservation freed -> availability restored
     setConf(null);
   }
   async function complete(o){
     const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
     const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
     const cour=o.custCourier!=null?o.custCourier:cf(tgw);
-    const disc=o.discTotal||sub;const grand=disc+cour;
-    const seq=nextSeq(sales);
-    const draft={seq,date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,sub,disc:sub-disc,discTotal:disc,courier:cour,grand};
-    const lineItems=o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}));
-    const { data, error } = await supabase.from('sales').insert(toDbSale(draft)).select().single();
-    if(error){alert('Failed to complete order: '+error.message);return;}
-    const { error: itErr } = await supabase.from('sale_items').insert(lineItems.map(li=>({sale_id:data.id,name:li.name,qty:li.qty,unit_price:li.up,total_price:li.tp})));
-    if(itErr){alert('Failed to save sale items: '+itErr.message);return;}
-    const { error: ordErr } = await supabase.from('orders').update({status:'completed'}).eq('id',o.id);
-    if(ordErr) console.error('Failed to sync completed status:', ordErr.message);
-    const sl={...draft,id:data.id,items:lineItems};
-    setSales(p=>[sl,...p]);setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed'}:x));setConf(null);
+    const disc=o.discTotal||sub;
+    // The RPC deducts the stock (earliest expiry first), frees the reservation,
+    // and records the sale — all in one atomic step.
+    const { data:saleId, error } = await supabase.rpc('complete_order',{
+      p_order_id:o.id, p_date:bjDate(), p_disc_total:disc, p_courier:cour
+    });
+    if(error){ alert('Could not complete the order:\n\n'+error.message); return; }
+    const sl={seq:nextSeq(sales),date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,
+      sub,disc:sub-disc,discTotal:disc,courier:cour,grand:disc+cour,id:saleId,
+      items:o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}))};
+    setSales(p=>[sl,...p]);
+    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed'}:x));
+    setConf(null);
+    if(reloadProducts)  await reloadProducts();   // stock deducted + reservation freed
+    if(reloadInventory) await reloadInventory();   // batches consumed
   }
   return(
     <div>
@@ -1369,7 +1370,7 @@ function OOTab({orders,setOrders,sales,setSales,reloadProducts,reloadInventory})
             </div>
             <div style={{display:'flex',gap:8}}>
               <Btn onClick={()=>setConf({msg:`Complete order ${o.id} and move to Sales List?`,yes:()=>complete(o)})}>✅ Complete Order</Btn>
-              <Btn v='danger' sm onClick={()=>setConf({msg:`Cancel order ${o.id}? The items will be returned to stock.`,yes:()=>cancelOrder(o)})}>Cancel</Btn>
+              <Btn v='danger' sm onClick={()=>setConf({msg:`Cancel order ${o.id}? The reserved stock will be released back to availability.`,yes:()=>cancelOrder(o)})}>Cancel</Btn>
             </div>
           </Card>
         );
