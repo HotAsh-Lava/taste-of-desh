@@ -946,7 +946,7 @@ export function toDbProduct(p) {
 // Inventory
 export function fromDbInv(row) {
   return {
-    id: row.id, date: row.date, ts: row.time || '', name: row.name,
+    id: row.id, pid: row.product_id ?? null, date: row.date, ts: row.time || '', name: row.name,
     cat: row.category || '', qty: row.qty, exp: row.expiry_date,
     sp: row.selling_price || 0, cp: row.cost_price || 0, pw: row.pack_weight || 0,
     upc: row.upc || '',
@@ -987,7 +987,7 @@ function fromDbSale(row, items) {
   return {
     id: row.id, seq: row.seq, date: row.date, type: row.type, oid: row.order_id,
     cname: row.customer_name, mob: row.mobile, addr: row.address,
-    items: items.map(it => ({ pid: it.product_id || null, name: it.name, qty: it.qty, up: it.unit_price, tp: it.total_price })),
+    items: items.map(it => ({ pid: it.product_id || null, name: it.name, qty: it.qty, up: it.unit_price, tp: it.total_price, draw: it.batch_draw || [] })),
     sub: row.subtotal, disc: row.discount, discTotal: row.discount_total,
     courier: row.courier_fee, grand: row.grand_total,
   };
@@ -1010,7 +1010,7 @@ function fromDbOrder(row, items) {
     proofUrl: row.payment_proof_url || '',     // uploaded payment screenshot
     payMethod: row.payment_method || '',       // 'alipay' | 'wechat'
     paid: !!row.paid, notes: row.notes || '',
-    items: items.map(it => ({ pid: it.product_id, name: it.name, qty: it.qty, up: it.unit_price, gw: it.gross_weight, disc: it.discount || 0 })),
+    items: items.map(it => ({ id: it.id, pid: it.product_id, name: it.name, qty: it.qty, up: it.unit_price, gw: it.gross_weight, disc: it.discount || 0 })),
   };
 }
 // Purchase orders — header + line items stored as jsonb (mirrors the existing `tracking jsonb` pattern)
