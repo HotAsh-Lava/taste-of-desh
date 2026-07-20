@@ -1262,9 +1262,11 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
   const [completing,setCompleting]=useState(null);   // { order, alloc:{ itemId:{ batchId:qty } } }
   const [editing,setEditing]=useState(null);          // { orderId, items:[{pid,name,qty,up,gw,disc}] }
   const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
+  const [showDone,setShowDone]=useState(false);
+  const done=orders.filter(o=>o.status==='completed');
 
   // ---- Editing a pending order's items (reservations only, no inventory yet) ----
-  function openEdit(o){ setEditing({orderId:o.id, items:o.items.map(i=>({pid:i.pid,name:i.name,qty:i.qty,up:i.up,gw:i.gw,disc:i.disc||0}))}); }
+  function openEdit(o){ setEditing({orderId:o.id, completed:o.status==='completed', items:o.items.map(i=>({pid:i.pid,name:i.name,qty:i.qty,up:i.up,gw:i.gw,disc:i.disc||0}))}); }
   const setItemQty=(idx,qty)=>setEditing(e=>({...e,items:e.items.map((it,i)=>i===idx?{...it,qty:Math.max(1,+qty||1)}:it)}));
   const removeItem=(idx)=>setEditing(e=>({...e,items:e.items.filter((_,i)=>i!==idx)}));
   function addItem(pid){
@@ -1279,9 +1281,28 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
     const e=editing;
     if(!e.items.length){ alert('An order needs at least one item. Cancel the order instead if you want it empty.'); return; }
     const p_items=e.items.map(i=>({product_id:i.pid, name:i.name, qty:i.qty, unit_price:i.up, gross_weight:i.gw, discount:i.disc||0}));
+    const localItems=e.items.map(i=>({pid:i.pid,name:i.name,qty:i.qty,up:i.up,gw:i.gw,disc:i.disc||0}));
+    if(e.completed){
+      // Completed order: restore the shipped stock, re-deduct the new items, rewrite the sale.
+      const o=orders.find(x=>x.id===e.orderId);
+      const oldSub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+      const discAmt=oldSub-(o.discTotal||oldSub);            // preserve any discount amount
+      const newSub=e.items.reduce((s,i)=>s+i.up*i.qty,0);
+      const newDisc=Math.max(0,newSub-discAmt);
+      const tgw=e.items.reduce((s,i)=>s+i.gw*i.qty,0);
+      const cour=o.custCourier!=null?o.custCourier:cf(tgw);
+      const { error:cErr }=await supabase.rpc('revise_completed_order',{ p_order_id:e.orderId, p_items, p_disc_total:newDisc, p_courier:cour });
+      if(cErr){ alert('Could not save the changes: '+cErr.message); return; }
+      setSales(p=>p.map(s=>s.oid===e.orderId?{...s,sub:newSub,disc:newSub-newDisc,discTotal:newDisc,courier:cour,grand:newDisc+cour,items:e.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2),draw:[]}))}:s));
+      setOrders(p=>p.map(o2=>o2.id===e.orderId?{...o2,items:localItems}:o2));
+      setEditing(null);
+      if(reloadProducts)  await reloadProducts();
+      if(reloadInventory) await reloadInventory();
+      return;
+    }
     const { error }=await supabase.rpc('revise_order',{ p_order_id:e.orderId, p_items });
     if(error){ alert('Could not save the changes:\n\n'+error.message); return; }
-    setOrders(p=>p.map(o=>o.id===e.orderId?{...o,items:e.items.map(i=>({pid:i.pid,name:i.name,qty:i.qty,up:i.up,gw:i.gw,disc:i.disc||0}))}:o));
+    setOrders(p=>p.map(o=>o.id===e.orderId?{...o,items:localItems}:o));
     setEditing(null);
     if(reloadProducts) await reloadProducts();   // reservations changed
   }
@@ -1379,7 +1400,9 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
         const sub=editing.items.reduce((s,i)=>s+i.up*i.qty,0);
         return(
           <Overlay title={`Edit items — ${editing.orderId}`} onClose={()=>setEditing(null)} width={600}>
-            <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Add, remove, or change quantities. Availability is checked when you save; stock isn't actually deducted until you complete the order.</div>
+            {editing.completed
+              ? <div style={{fontSize:12,color:'#8a6d00',background:'#FFF3E0',border:'1px solid #FFE0B2',borderRadius:6,padding:9,marginBottom:12}}>⚠️ This order is already completed. Saving will put the originally-shipped stock back, re-deduct the new items (soonest expiry first), and update the recorded sale accordingly.</div>
+              : <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Add, remove, or change quantities. Availability is checked when you save; stock isn't actually deducted until you complete the order.</div>}
             {editing.items.map((it,idx)=>(
               <div key={idx} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:`1px dashed ${G.brd}`}}>
                 <span style={{flex:1,fontSize:13}}>{it.name}<div style={{fontSize:10,color:G.mut}}>¥{(+it.up).toFixed(2)} each</div></span>
@@ -1476,6 +1499,31 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
           </Card>
         );
       })}
+      {done.length>0&&(
+        <div style={{marginTop:22}}>
+          <div onClick={()=>setShowDone(s=>!s)} style={{cursor:'pointer',fontWeight:'bold',fontSize:14,color:G.gd,marginBottom:8,userSelect:'none'}}>
+            {showDone?'▾':'▸'} Completed Orders ({done.length})
+          </div>
+          {showDone&&done.slice(0,20).map(o=>{
+            const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+            const cour=o.custCourier!=null?o.custCourier:cf(o.items.reduce((s,i)=>s+i.gw*i.qty,0));
+            const grand=(o.discTotal||sub)+cour;
+            return(
+              <Card key={o.id} style={{marginBottom:10}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+                  <div style={{minWidth:0}}>
+                    <div style={{fontWeight:'bold',fontSize:13,color:G.gd}}>{o.id}</div>
+                    <div style={{fontSize:11,color:G.mut}}>{o.date} · {o.cname} · ¥{grand.toFixed(2)}</div>
+                    <div style={{fontSize:11,color:G.tx,marginTop:3}}>{o.items.map(i=>`${i.name}×${i.qty}`).join(', ')}</div>
+                  </div>
+                  <Btn v='info' sm onClick={()=>openEdit(o)}>✏️ Edit Items</Btn>
+                </div>
+              </Card>
+            );
+          })}
+          {showDone&&done.length>20&&<div style={{fontSize:11,color:G.mut}}>Showing the 20 most recent. Older ones are in the Sales List.</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -1639,7 +1687,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
     // An online sale's stock came off the shelf when the customer checked out.
     // Editing it here would take it a second time, so don't allow it.
     if(s.type==='online'){
-      alert('That is a completed online order, not a walk-in invoice.\n\nIts stock was already deducted when the customer checked out, so editing it here would double-count. Manage it from the Online Orders tab instead.');
+      alert('That is a completed online order, not a walk-in invoice.\n\nTo change its items, open the Online Orders tab → "Completed Orders" → Edit Items. That restores the shipped stock and re-deducts correctly. Editing it here would double-count.');
       return;
     }
     setCurId(s.id); setOnum(s.seq);
