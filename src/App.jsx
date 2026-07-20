@@ -406,7 +406,7 @@ function PCard({p,addToCart}) {
         <span style={{color:p.offer?G.rd:G.gd,fontWeight:'bold',fontSize:16}}>¥{price.toFixed(2)}</span>
         {p.offer && <span style={{background:G.rl,color:G.rd,borderRadius:5,padding:'2px 7px',fontSize:10,fontWeight:'bold'}}>-{p.disc}%</span>}
       </div>
-      {p.stock===0
+      {p.avail===0
         ? <div style={{textAlign:'center',color:G.mut,fontSize:12,padding:6,background:G.bg,borderRadius:8}}>Out of Stock</div>
         : <button onClick={handleAdd} style={{width:'100%',background:added?G.g:G.gd,color:G.w,border:'none',borderRadius:9,padding:8,cursor:'pointer',fontSize:12,fontWeight:'bold',transition:'background 0.3s'}}>{added?'✓ Added!':'+ Add to Cart'}</button>
       }
@@ -489,8 +489,8 @@ export function Slideshow({slides,addToCart}) {
 }
 
 function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}) {
-  const bs = products.filter(p=>p.bs&&p.stock>0);
-  const offers = products.filter(p=>p.offer&&p.stock>0);
+  const bs = products.filter(p=>p.bs&&p.avail>0);
+  const offers = products.filter(p=>p.offer&&p.avail>0);
   const slides = useMemo(()=>{
     // Admin-uploaded promo slides always lead.
     const cS=(customSlides||[]).map(c=>({kind:'custom',img:cdnImage(c.img),caption:c.caption}));
@@ -504,20 +504,20 @@ function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}
     };
 
     // If the admin has hand-picked products for the slideshow, show exactly those.
-    const chosen=products.filter(p=>p.slideshow&&p.stock>0);
+    const chosen=products.filter(p=>p.slideshow&&p.avail>0);
     if(chosen.length) return [...cS, ...chosen.map(mkSlide)];
 
     // Fallback until any are picked: one item per category + a new arrival + a best seller.
     const used=new Set();
     const catS=(categories||[]).map(cat=>{
-      const inCat=products.filter(p=>p.cat===cat && p.stock>0);
+      const inCat=products.filter(p=>p.cat===cat && p.avail>0);
       if(!inCat.length) return null;
       const pick=inCat.find(p=>!p.bs&&!p.isNew)||inCat[0];
       used.add(pick.id);
       return mkSlide(pick);
     }).filter(Boolean);
-    const nS=products.filter(p=>p.isNew&&p.stock>0&&!used.has(p.id)).slice(0,1).map(mkSlide);
-    const bS=products.filter(p=>p.bs&&p.stock>0&&!used.has(p.id)).slice(0,1).map(mkSlide);
+    const nS=products.filter(p=>p.isNew&&p.avail>0&&!used.has(p.id)).slice(0,1).map(mkSlide);
+    const bS=products.filter(p=>p.bs&&p.avail>0&&!used.has(p.id)).slice(0,1).map(mkSlide);
     return [...cS,...catS,...nS,...bS];
   },[products,categories,customSlides,catColors]);
   return (
@@ -614,7 +614,7 @@ function CartTab({cart,prods,rawTotal,discTotal,hasDsc,totalGW,courierFee,grandT
         const price=ep(item);
         // live stock from the product list, not the snapshot taken when it was added
         const liveProd=prods?.find(p=>p.id===item.id);
-        const maxQty=liveProd?liveProd.stock:(item.stock||0);
+        const maxQty=liveProd?liveProd.avail:(item.avail||0);
         const atMax=item.qty>=maxQty;
         return(
           <div key={item.id} style={{background:G.w,borderRadius:14,padding:14,marginBottom:10,boxShadow:'0 2px 6px rgba(20,40,25,0.06)',display:'flex',gap:12,alignItems:'flex-start'}}>
@@ -927,6 +927,8 @@ export function fromDbProduct(row) {
     id: row.id, name: row.name, upc: row.upc || '', cat: row.category,
     unit: row.unit || 'PCS', pw: row.pack_weight, gw: row.gross_weight,
     sp: row.selling_price, cp: row.cost_price || 0, stock: row.stock || 0,
+    reserved: row.reserved || 0,
+    avail: Math.max(0, (row.stock || 0) - (row.reserved || 0)),   // what customers can buy
     disc: row.discount || 0, offer: !!row.on_offer, bs: !!row.best_seller,
     isNew: !!row.is_new, img: cdnImage(row.image_url || ''),
     slideshow: !!row.show_in_slideshow,
@@ -1724,7 +1726,7 @@ export default function App() {
   // the inventory actually holds. (The database re-checks this at checkout too —
   // client-side limits alone can be bypassed from the browser console.)
   function addToCart(p){
-    const max = p.stock || 0;
+    const max = p.avail || 0;
     if(max <= 0){ alert(`"${p.name}" is out of stock.`); return; }
     const ex = cart.find(i=>i.id===p.id);
     if(ex && ex.qty >= max){ alert(`Only ${max} of "${p.name}" ${max===1?'is':'are'} in stock.`); return; }
@@ -1737,7 +1739,7 @@ export default function App() {
   function upd(id,qty){
     if(qty<=0){rm(id);return;}
     const prod = prods.find(x=>x.id===id);
-    const max = prod ? prod.stock : 0;
+    const max = prod ? prod.avail : 0;
     if(qty > max){
       alert(`Only ${max} in stock.`);
       setCart(p=>p.map(i=>i.id===id?{...i,qty:Math.max(1,max)}:i));
@@ -1753,8 +1755,8 @@ export default function App() {
       let changed=false;
       const next=prev.map(i=>{
         const prod=prods.find(x=>x.id===i.id);
-        const max=prod?prod.stock:0;
-        if(i.qty>max){ changed=true; return {...i,qty:max,stock:max}; }
+        const max=prod?prod.avail:0;
+        if(i.qty>max){ changed=true; return {...i,qty:max,avail:max}; }
         return i;
       }).filter(i=>i.qty>0);
       return changed || next.length!==prev.length ? next : prev;
