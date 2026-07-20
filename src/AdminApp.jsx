@@ -1257,9 +1257,27 @@ function PLTab({pos,setPOs,inv,setInv,catColors}) {
   );
 }
 
-function OOTab({orders,setOrders,sales,setSales,reloadProducts,reloadInventory}) {
+function OOTab({orders,setOrders,sales,setSales,inv,reloadProducts,reloadInventory}) {
   const [conf,setConf]=useState(null);
+  const [completing,setCompleting]=useState(null);   // { order, alloc:{ itemId:{ batchId:qty } } }
   const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
+
+  // Physical batches available for an order line, soonest expiry first.
+  const batchesFor=(item)=>(inv||[])
+    .filter(b=> (item.pid!=null ? b.pid===item.pid : b.name===item.name) && b.qty>0)
+    .sort((a,b)=> String(a.exp||'9999-12-31').localeCompare(String(b.exp||'9999-12-31')) || a.id-b.id);
+  // Default allocation: fill soonest-expiry batches first, up to the ordered qty.
+  const fifoAlloc=(item)=>{ let need=item.qty; const m={}; for(const b of batchesFor(item)){ if(need<=0) break; const t=Math.min(b.qty,need); m[b.id]=t; need-=t; } return m; };
+  function openComplete(o){ const alloc={}; o.items.forEach(it=>{ alloc[it.id]=fifoAlloc(it); }); setCompleting({order:o,alloc}); }
+  const setAlloc=(itemId,batchId,qty)=>setCompleting(c=>({...c,alloc:{...c.alloc,[itemId]:{...c.alloc[itemId],[batchId]:qty}}}));
+  const allocSum=(itemId)=>Object.values((completing&&completing.alloc[itemId])||{}).reduce((s,q)=>s+(+q||0),0);
+  function confirmComplete(){
+    const o=completing.order;
+    for(const it of o.items){ if(allocSum(it.id)!==it.qty){ alert(`"${it.name}" is set to ${allocSum(it.id)} of ${it.qty}. Adjust the batches so they add up to ${it.qty}.`); return; } }
+    const p_alloc={};
+    o.items.forEach(it=>{ p_alloc[it.id]=Object.entries(completing.alloc[it.id]||{}).filter(([,q])=>+q>0).map(([bid,q])=>({inventory_id:+bid,qty:+q})); });
+    complete(o,p_alloc);
+  }
   const stC={pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd}};
   function upd(id,f,v){setOrders(p=>p.map(o=>o.id===id?{...o,[f]:v}:o));}
   async function syncOrder(o){
@@ -1280,15 +1298,15 @@ function OOTab({orders,setOrders,sales,setSales,reloadProducts,reloadInventory})
     if(reloadProducts) await reloadProducts();   // reservation freed -> availability restored
     setConf(null);
   }
-  async function complete(o){
+  async function complete(o, alloc){
     const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
     const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
     const cour=o.custCourier!=null?o.custCourier:cf(tgw);
     const disc=o.discTotal||sub;
-    // The RPC deducts the stock (earliest expiry first), frees the reservation,
-    // and records the sale — all in one atomic step.
+    // The RPC deducts from the chosen batches (or soonest expiry if none chosen),
+    // frees the reservation, and records the sale — all in one atomic step.
     const { data:saleId, error } = await supabase.rpc('complete_order',{
-      p_order_id:o.id, p_date:bjDate(), p_disc_total:disc, p_courier:cour
+      p_order_id:o.id, p_date:bjDate(), p_disc_total:disc, p_courier:cour, p_alloc:alloc||null
     });
     if(error){ alert('Could not complete the order:\n\n'+error.message); return; }
     const sl={seq:nextSeq(sales),date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,
@@ -1296,13 +1314,43 @@ function OOTab({orders,setOrders,sales,setSales,reloadProducts,reloadInventory})
       items:o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}))};
     setSales(p=>[sl,...p]);
     setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed'}:x));
-    setConf(null);
+    setCompleting(null); setConf(null);
     if(reloadProducts)  await reloadProducts();   // stock deducted + reservation freed
     if(reloadInventory) await reloadInventory();   // batches consumed
   }
   return(
     <div>
       {conf&&<ConfirmDlg msg={conf.msg} onYes={conf.yes} onNo={()=>setConf(null)}/>}
+      {completing&&(
+        <Overlay title={`Complete ${completing.order.id} — choose batches`} onClose={()=>setCompleting(null)} width={620}>
+          <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Pick which expiry batch(es) you're actually shipping for each item. It defaults to the soonest expiry, and you can split one item across several batches — the numbers just need to add up to the ordered quantity.</div>
+          {completing.order.items.map(it=>{
+            const batches=batchesFor(it); const sum=allocSum(it.id); const ok=sum===it.qty;
+            return(
+              <div key={it.id} style={{border:`1px solid ${ok?G.g:G.brd}`,borderRadius:8,padding:10,marginBottom:10,background:ok?G.gl:G.w}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                  <span style={{fontWeight:'bold',fontSize:13}}>{it.name}</span>
+                  <span style={{fontSize:12,fontWeight:'bold',color:ok?G.gd:G.rd}}>{sum} / {it.qty}</span>
+                </div>
+                {batches.length===0
+                  ? <div style={{fontSize:12,color:G.rd}}>⚠️ No stock batches available for this item — add inventory first.</div>
+                  : batches.map(b=>(
+                      <div key={b.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                        <span style={{flex:1,fontSize:12}}>Exp: <b>{b.exp||'—'}</b> <span style={{color:G.mut}}>({b.qty} in stock)</span></span>
+                        <input type="number" min="0" max={b.qty} value={(completing.alloc[it.id]&&completing.alloc[it.id][b.id])||0}
+                          onChange={e=>setAlloc(it.id,b.id,Math.max(0,Math.min(b.qty,+e.target.value||0)))}
+                          style={{width:64,padding:'3px 6px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,textAlign:'center'}}/>
+                      </div>
+                    ))}
+              </div>
+            );
+          })}
+          <div style={{display:'flex',gap:8,marginTop:6}}>
+            <Btn onClick={confirmComplete}>✅ Confirm & Complete</Btn>
+            <button onClick={()=>setCompleting(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+          </div>
+        </Overlay>
+      )}
       <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:4}}>🛒 Online Orders</div>
       <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Active: {active.length} · Cancelled: {orders.filter(o=>o.status==='cancelled').length} · Total: {orders.length}</div>
       {active.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No active orders</div></Card>:active.map(o=>{
@@ -1369,7 +1417,7 @@ function OOTab({orders,setOrders,sales,setSales,reloadProducts,reloadInventory})
               <Btn sm v='info' onClick={()=>{const nt=[...o.tracking,''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
             </div>
             <div style={{display:'flex',gap:8}}>
-              <Btn onClick={()=>setConf({msg:`Complete order ${o.id} and move to Sales List?`,yes:()=>complete(o)})}>✅ Complete Order</Btn>
+              <Btn onClick={()=>openComplete(o)}>✅ Complete Order</Btn>
               <Btn v='danger' sm onClick={()=>setConf({msg:`Cancel order ${o.id}? The reserved stock will be released back to availability.`,yes:()=>cancelOrder(o)})}>Cancel</Btn>
             </div>
           </Card>
@@ -1738,7 +1786,11 @@ function SLTab({sales,setSales,reloadProducts}) {
                     <div style={{fontWeight:'bold',fontSize:11,color:G.gd,marginBottom:6}}>Items Ordered:</div>
                     {s.items.map((it,k)=>(
                       <div key={k} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0',borderBottom:k<s.items.length-1?`1px dashed ${G.brd}`:'none'}}>
-                        <span>{it.name} × {it.qty}</span><span>¥{(it.tp!=null?it.tp:it.up*it.qty).toFixed(2)}</span>
+                        <div>
+                          <span>{it.name} × {it.qty}</span>
+                          {it.draw&&it.draw.length>0&&<div style={{fontSize:10,color:G.mut,marginTop:1}}>Exp: {it.draw.map(d=>`${d.expiry||'—'}${it.draw.length>1?` (×${d.qty})`:''}`).join(', ')}</div>}
+                        </div>
+                        <span>¥{(it.tp!=null?it.tp:it.up*it.qty).toFixed(2)}</span>
                       </div>
                     ))}
                   </td></tr>
@@ -1785,7 +1837,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
-          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
+          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts}/>}
          </TabErrorBoundary>
