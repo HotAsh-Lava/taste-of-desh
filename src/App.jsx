@@ -157,8 +157,14 @@ export function buildPOHTML({poNum,date,time,vendor,hdr,items,totQty,totC,totS,b
     </div>
   </body></html>`;
 }
-export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour,grand,hasDsc}){
+export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour,grand,hasDsc,qr}){
   const rows=items.map(i=>`<tr><td>${i.name}</td><td style="text-align:center">${i.qty}</td><td style="text-align:right">¥${(+i.up).toFixed(2)}</td><td style="text-align:right">¥${(+i.tp).toFixed(2)}</td></tr>`).join('');
+  // Payment QR codes (Alipay / WeChat) as uploaded in the admin dashboard. cdnImage()
+  // is in scope here, so stored Supabase URLs are rewritten to the fast-from-China CDN.
+  const qrCells=[];
+  if(qr&&qr.alipay) qrCells.push(`<div style="text-align:center"><div style="font-size:12px;font-weight:bold;color:#1677FF;margin-bottom:5px">💙 Alipay</div><img src="${cdnImage(qr.alipay)}" alt="Alipay QR" style="width:150px;height:150px;object-fit:contain;border:1px solid #ddd;border-radius:8px"/></div>`);
+  if(qr&&qr.wechat) qrCells.push(`<div style="text-align:center"><div style="font-size:12px;font-weight:bold;color:#07C160;margin-bottom:5px">💚 WeChat Pay</div><img src="${cdnImage(qr.wechat)}" alt="WeChat Pay QR" style="width:150px;height:150px;object-fit:contain;border:1px solid #ddd;border-radius:8px"/></div>`);
+  const qrBlock=qrCells.length?`<div style="margin-top:22px;text-align:center"><div style="font-weight:bold;font-size:13px;margin-bottom:10px;color:#15532D">Scan to Pay</div><div style="display:flex;gap:26px;justify-content:center;flex-wrap:wrap">${qrCells.join('')}</div></div>`:'';
   return `<html><head><title>Receipt ${orderNo}</title><style>
     body{font-family:Arial,sans-serif;padding:24px;color:#222}
     h2{color:#15532D;margin:0 0 2px}
@@ -182,6 +188,7 @@ export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour
       <div><span>Courier</span><span>¥${cour.toFixed(2)}</span></div>
       <div class="grand"><span>Grand Total</span><span>¥${grand.toFixed(2)}</span></div>
     </div>
+    ${qrBlock}
     <div class="center" style="margin-top:24px;font-style:italic">Thank you for your business</div>
   </body></html>`;
 }
@@ -1208,6 +1215,7 @@ function AuthScreen({onLogin,t}) {
 
 function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   const [sec,setSec]=useState('main');
+  const [openOrd,setOpenOrd]=useState(null);
   const [na,setNa] = useState({name:'',mob:'',addr:''});
   const stC = {pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd},completed:{bg:G.gl,c:G.gd}};
   const [addrBusy,setAddrBusy]=useState(false);
@@ -1283,16 +1291,48 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,cursor:'pointer'}} onClick={()=>setSec('main')}><span style={{fontSize:20}}>‹</span><span style={{fontWeight:'bold',fontSize:15}}>{t('myOrders')}</span></div>
           {orders.length===0?<div style={{textAlign:'center',color:G.mut,padding:40}}>{t('noOrdersYet')}</div>:orders.map(o=>{
             const sc=stC[o.status]||stC.pending;
+            const open=openOrd===o.id;
+            // The bill the customer saw at checkout: what they were charged per item,
+            // the courier fee, and the grand total. Stored on the order at checkout.
+            const charged=o.items.reduce((s,i)=>s+(i.up||0)*i.qty,0);
+            const courier=o.custCourier!=null?o.custCourier:cf(o.items.reduce((s,i)=>s+(i.gw||0)*i.qty,0));
+            const afterDisc=o.discTotal!=null?o.discTotal:charged;
+            const grand=afterDisc+courier;
+            const nItems=o.items.reduce((s,i)=>s+i.qty,0);
             return(
               <Card key={o.id} style={{marginBottom:10}}>
-                <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
-                  <span style={{fontWeight:'bold',fontSize:13,color:G.gd}}>{o.id}</span>
-                  <span style={{background:sc.bg,color:sc.c,borderRadius:10,padding:'2px 9px',fontSize:11,fontWeight:'bold'}}>{o.status}</span>
+                <div onClick={()=>setOpenOrd(open?null:o.id)} style={{cursor:'pointer'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',marginBottom:6,alignItems:'center'}}>
+                    <span style={{fontWeight:'bold',fontSize:13,color:G.gd}}>{o.id}</span>
+                    <div style={{display:'flex',alignItems:'center',gap:8}}>
+                      <span style={{background:sc.bg,color:sc.c,borderRadius:10,padding:'2px 9px',fontSize:11,fontWeight:'bold'}}>{o.status}</span>
+                      <span style={{color:G.mut,fontSize:13}}>{open?'▾':'▸'}</span>
+                    </div>
+                  </div>
+                  <div style={{fontSize:11,color:G.mut,marginBottom:5}}>{o.date}</div>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:8}}>
+                    <div style={{fontSize:12,color:G.tx,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:open?'normal':'nowrap'}}>{nItems} item{nItems!==1?'s':''}{!open&&<span style={{color:G.mut}}> · {o.items.map(i=>`${i.name} ×${i.qty}`).join(', ')}</span>}</div>
+                    <div style={{fontWeight:'bold',fontSize:13,color:G.gd,whiteSpace:'nowrap'}}>¥{grand.toFixed(2)}</div>
+                  </div>
                 </div>
-                <div style={{fontSize:11,color:G.mut,marginBottom:4}}>{o.date}</div>
-                <div style={{fontSize:12,color:G.tx,marginBottom:o.tracking.length?8:0}}>{o.items.map(i=>`${i.name} ×${i.qty}`).join(', ')}</div>
+                {open&&(
+                  <div style={{marginTop:10,borderTop:`1px solid ${G.brd}`,paddingTop:10}}>
+                    <div style={{fontWeight:'bold',fontSize:12,marginBottom:7,color:G.tx}}>🛒 {t('orderSummary')}</div>
+                    {o.items.map((i,k)=>(
+                      <div key={k} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:4}}>
+                        <span style={{color:G.tx}}>{i.name} <span style={{color:G.mut}}>×{i.qty}</span></span>
+                        <span>¥{((i.up||0)*i.qty).toFixed(2)}</span>
+                      </div>
+                    ))}
+                    <div style={{borderTop:`1px solid ${G.brd}`,marginTop:8,paddingTop:8}}>
+                      <div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:4}}><span>{t('subtotal')}</span><span>¥{charged.toFixed(2)}</span></div>
+                      <div style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:4}}><span>{t('courier')}</span><span>¥{courier.toFixed(2)}</span></div>
+                      <div style={{display:'flex',justifyContent:'space-between',fontWeight:'bold',fontSize:15,color:G.gd,marginTop:4}}><span>{t('grandTotal')}</span><span>¥{grand.toFixed(2)}</span></div>
+                    </div>
+                  </div>
+                )}
                 {o.tracking.length>0&&(
-                  <div style={{background:G.bl,borderRadius:8,padding:'8px 10px',fontSize:12}}>
+                  <div style={{background:G.bl,borderRadius:8,padding:'8px 10px',fontSize:12,marginTop:10}}>
                     <div style={{fontWeight:'bold',color:G.bd,marginBottom:3}}>📦 {t('tracking')}</div>
                     {o.tracking.map(tk=><div key={tk} style={{color:G.bd}}>{tk}</div>)}
                   </div>
