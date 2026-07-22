@@ -1430,10 +1430,19 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
       <div style={{fontSize:12,color:G.mut,marginBottom:16}}>Active: {active.length} · Cancelled: {orders.filter(o=>o.status==='cancelled').length} · Total: {orders.length}</div>
       {active.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No active orders</div></Card>:active.map(o=>{
         const sc=stC[o.status]||stC.pending;
-        const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+        // Checkout-style breakdown: subtotal at the set (full) price, then the price
+        // actually charged (after any offer/custom discount), courier, and grand total
+        // — mirroring what the customer saw at checkout. The set price comes from the
+        // current product; it falls back to the charged price if the product is gone or
+        // its price dropped below what was charged (so the subtotal is never lower than
+        // the amount charged, which would look broken).
+        const charged=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+        const setSub=o.items.reduce((s,i)=>{const p=(prods||[]).find(x=>x.id===i.pid);const sp=(p&&p.sp>=i.up)?p.sp:i.up;return s+sp*i.qty;},0);
         const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
         const cour=o.custCourier!=null?o.custCourier:cf(tgw);
-        const disc=o.discTotal||sub;const grand=disc+cour;
+        const disc=o.discTotal!=null?o.discTotal:charged;
+        const grand=disc+cour;
+        const showDisc=setSub>disc+0.005;
         return(
           <Card key={o.id} style={{marginBottom:16}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12}}>
@@ -1463,12 +1472,14 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
               }
             </div>
             <div style={{background:G.bg,borderRadius:8,padding:10,marginBottom:10}}>
-              {o.items.map((it,i)=><div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:3}}><span>{it.name} ×{it.qty}</span><span>¥{(it.up*it.qty).toFixed(2)}</span></div>)}
+              {o.items.map((it,i)=>{const p=(prods||[]).find(x=>x.id===it.pid);const sp=(p&&p.sp>=it.up)?p.sp:it.up;return(<div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:3}}><span>{it.name} ×{it.qty}</span><span>¥{(sp*it.qty).toFixed(2)}</span></div>);})}
               <div style={{borderTop:`1px solid ${G.brd}`,marginTop:7,paddingTop:7}}>
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:12}}><span>Subtotal</span><span>¥{sub.toFixed(2)}</span></div>
-                {disc!==sub&&<div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:G.gd}}><span>After Discount</span><span>¥{disc.toFixed(2)}</span></div>}
+                {showDisc
+                  ? <><div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:G.mut,textDecoration:'line-through'}}><span>Subtotal</span><span>¥{setSub.toFixed(2)}</span></div>
+                      <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:G.gd,fontWeight:'bold'}}><span>Price After Discount</span><span>¥{disc.toFixed(2)}</span></div></>
+                  : <div style={{display:'flex',justifyContent:'space-between',fontSize:12}}><span>Subtotal</span><span>¥{setSub.toFixed(2)}</span></div>}
                 <div style={{display:'flex',justifyContent:'space-between',fontSize:12,alignItems:'center'}}>
-                  <span>Courier</span>
+                  <span>Courier ({tgw.toFixed(2)} kg)</span>
                   <div style={{display:'flex',alignItems:'center',gap:5}}>
                     <input type="number" value={o.custCourier??''} onChange={e=>upd(o.id,'custCourier',e.target.value===''?null:+e.target.value)} onBlur={()=>syncOrder(o)} placeholder={String(cf(tgw))} style={{width:58,padding:'2px 5px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/>
                     <span>¥{cour.toFixed(2)}</span>
@@ -1528,7 +1539,7 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
   );
 }
 
-function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
+function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   function blankSIItem(){return {pid:null,name:'',pw:'',qty:'',unit:'PCS',up:'',tp:'',gw:'',exps:[],exp:''};}
   const [cust,setCust]=useState({name:'',addr:'',mob:''});
   const [items,setItems]=useState([blankSIItem()]);
@@ -1589,7 +1600,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
   function selectProduct(idx,p){
     setItems(prev=>{
       const exps = inv.filter(x=>x.name===p.name && x.qty>0).map(x=>({exp:x.exp,qty:x.qty}));
-      const next = prev.map((it,i)=> i!==idx ? it : recalcRow({...it,pid:p.id,name:p.name,pw:p.pw,up:ep(p),unit:p.unit,gw:p.gw,exps,exp:''}));
+      const next = prev.map((it,i)=> i!==idx ? it : recalcRow({...it,pid:p.id,name:p.name,pw:p.pw,up:p.sp,unit:p.unit,gw:p.gw,exps,exp:''}));
       return idx===prev.length-1 ? [...next, blankSIItem()] : next;
     });
   }
@@ -1680,7 +1691,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
   }
   function printCurrent(){
     const existing = curId ? sales.find(s=>s.id===curId) : null;
-    const html=buildSalesReceiptHTML({orderNo:existing?existing.seq:onum,cname:cust.name,mob:cust.mob,addr:cust.addr,items:items.filter(i=>i.name&&i.qty),sub,pad,cour,grand,hasDsc});
+    const html=buildSalesReceiptHTML({orderNo:existing?existing.seq:onum,cname:cust.name,mob:cust.mob,addr:cust.addr,items:items.filter(i=>i.name&&i.qty),sub,pad,cour,grand,hasDsc,qr:qrCodes});
     openPrintWindow(html);
   }
   function loadOrder(s){
@@ -1711,7 +1722,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts}) {
     if(reloadProducts) await reloadProducts();
   }
   function printSale(s){
-    openPrintWindow(buildSalesReceiptHTML({orderNo:s.seq,cname:s.cname,mob:s.mob,addr:s.addr,items:s.items,sub:s.sub,pad:s.discTotal,cour:s.courier,grand:s.grand,hasDsc:s.disc>0}));
+    openPrintWindow(buildSalesReceiptHTML({orderNo:s.seq,cname:s.cname,mob:s.mob,addr:s.addr,items:s.items,sub:s.sub,pad:s.discTotal,cour:s.courier,grand:s.grand,hasDsc:s.disc>0,qr:qrCodes}));
   }
 
   const recent = useMemo(()=>{
@@ -1948,7 +1959,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
-          {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts}/>}
+          {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
          </TabErrorBoundary>
         </div>
