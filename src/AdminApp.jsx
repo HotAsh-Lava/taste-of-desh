@@ -1359,14 +1359,18 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
       setCompleting(null);
     } finally { setSavingAlloc(false); }
   }
-  function confirmComplete(){
-    const o=completing.order;
-    for(const it of o.items){ if(allocSum(it.id)!==it.qty){ alert(`"${it.name}" is set to ${allocSum(it.id)} of ${it.qty}. Adjust the batches so they add up to ${it.qty}.`); return; } }
-    complete(o,buildAlloc());
-  }
-  // The "packed — finish it" path. If a complete selection was saved earlier, this
-  // completes straight from it. Otherwise it opens the picker so batches get chosen.
+  // Tracking is required before an online order can be completed. An order counts as
+  // having tracking if at least one non-empty tracking number is present.
+  const hasTracking=(o)=>Array.isArray(o&&o.tracking)&&o.tracking.some(t=>t&&String(t).trim());
+  // Edit the tracking number(s) from inside the completion window. onChange keeps
+  // typing responsive locally; onBlur / add / remove persist it to the order + DB.
+  const editPickTrack=(tr)=>{ if(!completing) return; setCompleting(c=>c?{...c,order:{...c.order,tracking:tr}}:c); upd(completing.order.id,'tracking',tr); };
+  const savePickTrack=(tr)=>{ editPickTrack(tr); if(completing) syncOrder({...completing.order,tracking:tr}); };
+  // The "packed — finish it" path. Tracking must already be set and a complete batch
+  // pick saved; if either is missing we point the user at the right field on the card
+  // rather than completing. Completion happens only from here now (not the batch popup).
   function completeNow(o){
+    if(!hasTracking(o)){ alert('This order needs a tracking number before it can be completed.\n\nAdd it in the "📦 Tracking Numbers" box on the order card, then click Complete Order.'); return; }
     const saved=o.plannedAlloc;
     if(saved&&Object.keys(saved).length){
       const p_alloc={}; let ready=true;
@@ -1429,7 +1433,19 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
       {conf&&<ConfirmDlg msg={conf.msg} onYes={conf.yes} onNo={()=>setConf(null)}/>}
       {completing&&(
         <Overlay title={`${completing.order.id} — expiry batches`} onClose={()=>setCompleting(null)} width={620}>
-          <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Pick which expiry batch(es) you're shipping for each item. It defaults to the soonest expiry, and you can split one item across several batches.<br/><b style={{color:G.tx}}>💾 Save Selection</b> just remembers your choice — no stock is deducted and the order stays active. <b style={{color:G.tx}}>✅ Complete Order</b> is the final step once it's packed: it deducts the stock and records the sale.</div>
+          <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Pick which expiry batch(es) you're shipping for each item. It defaults to the soonest expiry, and you can split one item across several batches.<br/><b style={{color:G.tx}}>💾 Save Selection</b> just remembers your choice — no stock is deducted and the order stays active. When it's packed, finish it with the <b style={{color:G.tx}}>✅ Complete Order</b> button on the order card.</div>
+          {(()=>{const trackOk=hasTracking(completing.order);const tr=completing.order.tracking||[];const rows=tr.length?tr:[''];return(
+            <div style={{marginBottom:14,padding:11,borderRadius:8,border:`1px solid ${trackOk?G.g:'#F0B4B4'}`,background:trackOk?G.gl:'#FFF6F6'}}>
+              <div style={{fontSize:12,fontWeight:'bold',color:trackOk?G.gd:G.rd,marginBottom:7}}>{trackOk?'📦 Tracking number ✓':'📦 Tracking number — required to complete'}</div>
+              {rows.map((tk,i)=>(
+                <div key={i} style={{display:'flex',gap:6,marginBottom:6}}>
+                  <input value={tk} onChange={e=>{const nt=[...rows];nt[i]=e.target.value;editPickTrack(nt);}} onBlur={()=>savePickTrack((completing.order.tracking||['']).map(x=>x))} placeholder="e.g. SF1234567890" style={{flex:1,padding:'6px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
+                  {tr.length>1&&<button onClick={()=>savePickTrack(tr.filter((_,j)=>j!==i))} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>}
+                </div>
+              ))}
+              <Btn sm v='info' onClick={()=>savePickTrack([...(completing.order.tracking||[]),''])}>+ Add Tracking #</Btn>
+            </div>
+          );})()}
           {completing.order.items.map(it=>{
             const batches=batchesFor(it); const sum=allocSum(it.id); const ok=sum===it.qty;
             return(
@@ -1453,10 +1469,9 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
           })}
           <div style={{display:'flex',gap:8,marginTop:6,flexWrap:'wrap',alignItems:'center'}}>
             <Btn v='info' onClick={saveAlloc} disabled={savingAlloc}>{savingAlloc?'Saving…':'💾 Save Selection'}</Btn>
-            <Btn onClick={confirmComplete} disabled={savingAlloc}>✅ Complete Order</Btn>
-            <button onClick={()=>setCompleting(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+            <button onClick={()=>setCompleting(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Close</button>
           </div>
-          <div style={{fontSize:11,color:G.mut,marginTop:8}}>Saving works even if the quantities don't add up yet — you can finish the pick later. Completing requires every item to add up to its ordered quantity.</div>
+          <div style={{fontSize:11,color:G.mut,marginTop:8}}>Saving works even if the quantities don't add up yet — you can finish the pick later. When you complete the order from its card, every item must add up to its ordered quantity.</div>
         </Overlay>
       )}
       {editing&&(()=>{
@@ -1612,6 +1627,16 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
                     <div style={{fontSize:11,color:G.tx,marginTop:3}}>{o.items.map(i=>`${i.name}×${i.qty}`).join(', ')}</div>
                   </div>
                   <Btn v='info' sm onClick={()=>openEdit(o)}>✏️ Edit Items</Btn>
+                </div>
+                <div style={{marginTop:9,borderTop:`1px solid ${G.brd}`,paddingTop:9}}>
+                  <div style={{fontSize:11,fontWeight:'bold',color:hasTracking(o)?G.gd:G.mut,marginBottom:6}}>📦 Tracking{hasTracking(o)?'':' — none added yet'}</div>
+                  {(o.tracking||[]).map((tk,i)=>(
+                    <div key={i} style={{display:'flex',gap:6,marginBottom:6}}>
+                      <input value={tk} onChange={e=>{const tr=[...o.tracking];tr[i]=e.target.value;upd(o.id,'tracking',tr);}} onBlur={()=>syncOrder(o)} placeholder="e.g. SF1234567890" style={{flex:1,padding:'5px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
+                      <button onClick={()=>{const nt=o.tracking.filter((_,j)=>j!==i);upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>
+                    </div>
+                  ))}
+                  <Btn sm v='info' onClick={()=>{const nt=[...(o.tracking||[]),''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
                 </div>
               </Card>
             );
