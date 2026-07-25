@@ -1017,6 +1017,7 @@ function fromDbOrder(row, items) {
     proofUrl: row.payment_proof_url || '',     // uploaded payment screenshot
     payMethod: row.payment_method || '',       // 'alipay' | 'wechat'
     paid: !!row.paid, notes: row.notes || '',
+    plannedAlloc: row.planned_alloc || null,   // saved batch/expiry pick, set before completing
     items: items.map(it => ({ id: it.id, pid: it.product_id, name: it.name, qty: it.qty, up: it.unit_price, gw: it.gross_weight, disc: it.discount || 0 })),
   };
 }
