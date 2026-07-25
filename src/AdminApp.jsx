@@ -1260,6 +1260,7 @@ function PLTab({pos,setPOs,inv,setInv,catColors}) {
 function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadInventory}) {
   const [conf,setConf]=useState(null);
   const [completing,setCompleting]=useState(null);   // { order, alloc:{ itemId:{ batchId:qty } } }
+  const [savingAlloc,setSavingAlloc]=useState(false);
   const [editing,setEditing]=useState(null);          // { orderId, items:[{pid,name,qty,up,gw,disc}] }
   const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
   const [showDone,setShowDone]=useState(false);
@@ -1313,15 +1314,75 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
     .sort((a,b)=> String(a.exp||'9999-12-31').localeCompare(String(b.exp||'9999-12-31')) || a.id-b.id);
   // Default allocation: fill soonest-expiry batches first, up to the ordered qty.
   const fifoAlloc=(item)=>{ let need=item.qty; const m={}; for(const b of batchesFor(item)){ if(need<=0) break; const t=Math.min(b.qty,need); m[b.id]=t; need-=t; } return m; };
-  function openComplete(o){ const alloc={}; o.items.forEach(it=>{ alloc[it.id]=fifoAlloc(it); }); setCompleting({order:o,alloc}); }
+  // A previously SAVED batch pick for one order line, converted from the stored
+  // format [{inventory_id,qty}] into the picker's {batchId:qty} shape. Batches that
+  // no longer exist (or are used up) are dropped, so the picker never shows or
+  // counts a phantom row. Returns null when there's nothing usable saved.
+  const savedAllocFor=(o,it)=>{
+    const lines=(o.plannedAlloc||{})[String(it.id)];
+    if(!Array.isArray(lines)||!lines.length) return null;
+    const valid=new Set(batchesFor(it).map(b=>b.id));
+    const m={};
+    lines.forEach(l=>{ const bid=+l.inventory_id, q=+l.qty||0; if(q>0&&valid.has(bid)) m[bid]=q; });
+    return Object.keys(m).length?m:null;
+  };
+  // Opening the picker restores what you saved earlier; anything not saved falls
+  // back to soonest-expiry-first as before.
+  function openComplete(o){
+    const alloc={};
+    o.items.forEach(it=>{ alloc[it.id]=savedAllocFor(o,it)||fifoAlloc(it); });
+    setCompleting({order:o,alloc});
+  }
   const setAlloc=(itemId,batchId,qty)=>setCompleting(c=>({...c,alloc:{...c.alloc,[itemId]:{...c.alloc[itemId],[batchId]:qty}}}));
   const allocSum=(itemId)=>Object.values((completing&&completing.alloc[itemId])||{}).reduce((s,q)=>s+(+q||0),0);
+  // Picker state -> the {order_item_id:[{inventory_id,qty}]} format both
+  // save_order_alloc and complete_order expect. Zero quantities are dropped.
+  function buildAlloc(){
+    const p={};
+    completing.order.items.forEach(it=>{
+      const lines=Object.entries(completing.alloc[it.id]||{}).filter(([,q])=>+q>0).map(([bid,q])=>({inventory_id:+bid,qty:+q}));
+      if(lines.length) p[it.id]=lines;
+    });
+    return p;
+  }
+  // SAVE ONLY: records which expiry batches you intend to ship. No stock moves and
+  // the order stays active, so you can come back and complete it once it's packed.
+  // A part-finished pick is allowed here on purpose.
+  async function saveAlloc(){
+    const o=completing.order;
+    const p_alloc=buildAlloc();
+    setSavingAlloc(true);
+    try{
+      const { error }=await supabase.rpc('save_order_alloc',{ p_order_id:o.id, p_alloc });
+      if(error){ alert('Could not save the batch selection:\n\n'+error.message); return; }
+      setOrders(p=>p.map(x=>x.id===o.id?{...x,plannedAlloc:Object.keys(p_alloc).length?p_alloc:null}:x));
+      setCompleting(null);
+    } finally { setSavingAlloc(false); }
+  }
   function confirmComplete(){
     const o=completing.order;
     for(const it of o.items){ if(allocSum(it.id)!==it.qty){ alert(`"${it.name}" is set to ${allocSum(it.id)} of ${it.qty}. Adjust the batches so they add up to ${it.qty}.`); return; } }
-    const p_alloc={};
-    o.items.forEach(it=>{ p_alloc[it.id]=Object.entries(completing.alloc[it.id]||{}).filter(([,q])=>+q>0).map(([bid,q])=>({inventory_id:+bid,qty:+q})); });
-    complete(o,p_alloc);
+    complete(o,buildAlloc());
+  }
+  // The "packed — finish it" path. If a complete selection was saved earlier, this
+  // completes straight from it. Otherwise it opens the picker so batches get chosen.
+  function completeNow(o){
+    const saved=o.plannedAlloc;
+    if(saved&&Object.keys(saved).length){
+      const p_alloc={}; let ready=true;
+      for(const it of o.items){
+        const m=savedAllocFor(o,it);
+        const sum=m?Object.values(m).reduce((s,q)=>s+(+q||0),0):0;
+        if(!m||sum!==it.qty){ ready=false; break; }
+        p_alloc[it.id]=Object.entries(m).map(([bid,q])=>({inventory_id:+bid,qty:+q}));
+      }
+      if(ready){
+        setConf({msg:`Complete ${o.id} using the saved batch selection? Stock will be deducted and the sale recorded.`,yes:()=>complete(o,p_alloc)});
+        return;
+      }
+      alert('The saved batch selection no longer adds up — stock may have changed since you saved it. Please review the batches.');
+    }
+    openComplete(o);
   }
   const stC={pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd}};
   function upd(id,f,v){setOrders(p=>p.map(o=>o.id===id?{...o,[f]:v}:o));}
@@ -1358,7 +1419,7 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
       sub,disc:sub-disc,discTotal:disc,courier:cour,grand:disc+cour,id:saleId,
       items:o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}))};
     setSales(p=>[sl,...p]);
-    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed'}:x));
+    setOrders(p=>p.map(x=>x.id===o.id?{...x,status:'completed',plannedAlloc:null}:x));
     setCompleting(null); setConf(null);
     if(reloadProducts)  await reloadProducts();   // stock deducted + reservation freed
     if(reloadInventory) await reloadInventory();   // batches consumed
@@ -1367,8 +1428,8 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
     <div>
       {conf&&<ConfirmDlg msg={conf.msg} onYes={conf.yes} onNo={()=>setConf(null)}/>}
       {completing&&(
-        <Overlay title={`Complete ${completing.order.id} — choose batches`} onClose={()=>setCompleting(null)} width={620}>
-          <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Pick which expiry batch(es) you're actually shipping for each item. It defaults to the soonest expiry, and you can split one item across several batches — the numbers just need to add up to the ordered quantity.</div>
+        <Overlay title={`${completing.order.id} — expiry batches`} onClose={()=>setCompleting(null)} width={620}>
+          <div style={{fontSize:12,color:G.mut,marginBottom:12}}>Pick which expiry batch(es) you're shipping for each item. It defaults to the soonest expiry, and you can split one item across several batches.<br/><b style={{color:G.tx}}>💾 Save Selection</b> just remembers your choice — no stock is deducted and the order stays active. <b style={{color:G.tx}}>✅ Complete Order</b> is the final step once it's packed: it deducts the stock and records the sale.</div>
           {completing.order.items.map(it=>{
             const batches=batchesFor(it); const sum=allocSum(it.id); const ok=sum===it.qty;
             return(
@@ -1390,10 +1451,12 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
               </div>
             );
           })}
-          <div style={{display:'flex',gap:8,marginTop:6}}>
-            <Btn onClick={confirmComplete}>✅ Confirm & Complete</Btn>
+          <div style={{display:'flex',gap:8,marginTop:6,flexWrap:'wrap',alignItems:'center'}}>
+            <Btn v='info' onClick={saveAlloc} disabled={savingAlloc}>{savingAlloc?'Saving…':'💾 Save Selection'}</Btn>
+            <Btn onClick={confirmComplete} disabled={savingAlloc}>✅ Complete Order</Btn>
             <button onClick={()=>setCompleting(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
           </div>
+          <div style={{fontSize:11,color:G.mut,marginTop:8}}>Saving works even if the quantities don't add up yet — you can finish the pick later. Completing requires every item to add up to its ordered quantity.</div>
         </Overlay>
       )}
       {editing&&(()=>{
@@ -1488,6 +1551,26 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
                 <div style={{display:'flex',justifyContent:'space-between',fontWeight:'bold',fontSize:14,marginTop:5,color:G.gd}}><span>Grand Total</span><span>¥{grand.toFixed(2)}</span></div>
               </div>
             </div>
+            {o.plannedAlloc&&Object.keys(o.plannedAlloc).length>0&&(()=>{
+              // At-a-glance reminder of the expiry batches already picked for this
+              // order, so you know it's ready to pack without reopening the picker.
+              const lines=o.items.map(it=>{
+                const m=savedAllocFor(o,it); if(!m) return null;
+                const parts=Object.entries(m).map(([bid,q])=>{const b=(inv||[]).find(x=>x.id===+bid);return `${q} × exp ${b&&b.exp?b.exp:'—'}`;});
+                const sum=Object.values(m).reduce((s,q)=>s+(+q||0),0);
+                return {name:it.name,txt:parts.join(', '),ok:sum===it.qty,sum,qty:it.qty};
+              }).filter(Boolean);
+              if(!lines.length) return null;
+              const allOk=lines.length===o.items.length&&lines.every(l=>l.ok);
+              return(
+                <div style={{marginBottom:10,padding:'8px 10px',borderRadius:8,background:allOk?G.gl:G.goldl,border:`1px solid ${allOk?G.g:'#FFE0B2'}`}}>
+                  <div style={{fontSize:10,fontWeight:'bold',color:allOk?G.gd:'#8a6d00',marginBottom:4}}>
+                    {allOk?'📦 BATCHES SAVED — READY TO COMPLETE':'📦 BATCHES SAVED (INCOMPLETE PICK)'}
+                  </div>
+                  {lines.map((l,i)=><div key={i} style={{fontSize:11,color:G.tx}}>{l.name}: {l.txt}{!l.ok&&<span style={{color:G.rd}}> ({l.sum} of {l.qty})</span>}</div>)}
+                </div>
+              );
+            })()}
             <div style={{marginBottom:10,display:'flex',alignItems:'center',gap:8,fontSize:12}}>
               <span style={{color:G.tx,whiteSpace:'nowrap'}}>Custom discount price (¥):</span>
               <input type="number" value={o.discTotal??''} onChange={e=>upd(o.id,'discTotal',e.target.value?+e.target.value:null)} onBlur={()=>syncOrder(o)} placeholder="Optional" style={{width:90,padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
@@ -1502,8 +1585,9 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
               ))}
               <Btn sm v='info' onClick={()=>{const nt=[...o.tracking,''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
             </div>
-            <div style={{display:'flex',gap:8}}>
-              <Btn onClick={()=>openComplete(o)}>✅ Complete Order</Btn>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              <Btn v='info' sm onClick={()=>openComplete(o)}>{o.plannedAlloc&&Object.keys(o.plannedAlloc).length?'📦 Batches ✓':'📦 Select Batches'}</Btn>
+              <Btn onClick={()=>completeNow(o)}>✅ Complete Order</Btn>
               <Btn v='info' sm onClick={()=>openEdit(o)}>✏️ Edit Items</Btn>
               <Btn v='danger' sm onClick={()=>setConf({msg:`Cancel order ${o.id}? The reserved stock will be released back to availability.`,yes:()=>cancelOrder(o)})}>Cancel</Btn>
             </div>
