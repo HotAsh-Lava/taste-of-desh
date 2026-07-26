@@ -1950,7 +1950,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   );
 }
 
-function SLTab({sales,setSales,reloadProducts,reloadInventory,reloadOrders}) {
+function SLTab({sales,setSales,prods,reloadProducts,reloadInventory,reloadOrders}) {
   const [q,setQ]=useState('');
   const [exp,setExp]=useState(new Set());
   const [sel,setSel]=useState([]);
@@ -1998,7 +1998,24 @@ function SLTab({sales,setSales,reloadProducts,reloadInventory,reloadOrders}) {
                 <th key={h} style={{padding:'9px 7px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
               ))}
             </tr></thead>
-            <tbody>{list.map((s,i)=>(
+            <tbody>{list.map((s,i)=>{
+              // Online sales are recorded at the discounted (charged) price, so their
+              // saved discount is 0. Rebuild the set-price subtotal from current product
+              // prices — the same basis the Online Orders tab uses — so the offer discount
+              // shows here too. Walk-in invoices already store the set price and discount
+              // separately, so they're shown exactly as recorded.
+              let dispSub=s.sub, dispDisc=s.disc;
+              if(s.type==='online'){
+                const setSub=(s.items||[]).reduce((acc,it)=>{
+                  const p=(prods||[]).find(x=>x.id===it.pid);
+                  const sp=(p&&p.sp>=it.up)?p.sp:it.up;
+                  return acc+sp*it.qty;
+                },0);
+                const charged=s.discTotal!=null?s.discTotal:s.sub;
+                dispSub=setSub;
+                dispDisc=Math.max(0,+(setSub-charged).toFixed(2));
+              }
+              return(
               <React.Fragment key={s.id}>
                 <tr style={{background:i%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
                   <td style={{padding:'7px',textAlign:'center'}}><input type="checkbox" checked={sel.includes(s.id)} onChange={()=>setSel(p=>p.includes(s.id)?p.filter(x=>x!==s.id):[...p,s.id])}/></td>
@@ -2006,8 +2023,8 @@ function SLTab({sales,setSales,reloadProducts,reloadInventory,reloadOrders}) {
                   <td style={{padding:'7px',textAlign:'center',fontWeight:'bold',color:G.gd}}>#{s.seq}</td><td style={{padding:'7px',textAlign:'center'}}>{s.date}</td>
                   <td style={{padding:'7px',textAlign:'center'}}><span style={{background:s.type==='online'?G.bl:G.goldl,color:s.type==='online'?G.bd:G.yd,borderRadius:8,padding:'2px 8px',fontSize:11,fontWeight:'bold'}}>{s.type==='online'?'🛒 Online':'💰 Invoice'}</span></td>
                   <td style={{padding:'7px'}}>{s.cname||'—'}</td><td style={{padding:'7px'}}>{s.mob||'—'}</td>
-                  <td style={{padding:'7px',textAlign:'center'}}>¥{s.sub?.toFixed(2)}</td>
-                  <td style={{padding:'7px',textAlign:'center',color:s.disc>0?'#B71C1C':G.mut}}>{s.disc>0?`-¥${s.disc.toFixed(2)}`:'—'}</td>
+                  <td style={{padding:'7px',textAlign:'center'}}>¥{dispSub?.toFixed(2)}</td>
+                  <td style={{padding:'7px',textAlign:'center',color:dispDisc>0?'#B71C1C':G.mut}}>{dispDisc>0?`-¥${dispDisc.toFixed(2)}`:'—'}</td>
                   <td style={{padding:'7px',textAlign:'center'}}>¥{s.courier?.toFixed(2)}</td>
                   <td style={{padding:'7px',textAlign:'center',fontWeight:'bold',fontSize:14,color:G.gd}}>¥{s.grand?.toFixed(2)}</td>
                 </tr>
@@ -2026,7 +2043,8 @@ function SLTab({sales,setSales,reloadProducts,reloadInventory,reloadOrders}) {
                   </td></tr>
                 )}
               </React.Fragment>
-            ))}</tbody>
+              );
+            })}</tbody>
           </table>
         </div>
       )}
@@ -2069,7 +2087,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/>}
-          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
+          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
          </TabErrorBoundary>
         </div>
       </div>
