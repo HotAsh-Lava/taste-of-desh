@@ -1257,7 +1257,7 @@ function PLTab({pos,setPOs,inv,setInv,catColors}) {
   );
 }
 
-function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadInventory}) {
+function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadInventory,reloadOrders}) {
   const [conf,setConf]=useState(null);
   const [completing,setCompleting]=useState(null);   // { order, alloc:{ itemId:{ batchId:qty } } }
   const [savingAlloc,setSavingAlloc]=useState(false);
@@ -1295,7 +1295,9 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
       const { error:cErr }=await supabase.rpc('revise_completed_order',{ p_order_id:e.orderId, p_items, p_disc_total:newDisc, p_courier:cour });
       if(cErr){ alert('Could not save the changes: '+cErr.message); return; }
       setSales(p=>p.map(s=>s.oid===e.orderId?{...s,sub:newSub,disc:newSub-newDisc,discTotal:newDisc,courier:cour,grand:newDisc+cour,items:e.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2),draw:[]}))}:s));
-      setOrders(p=>p.map(o2=>o2.id===e.orderId?{...o2,items:localItems}:o2));
+      // revise_completed_order also deletes and recreates order_items with new ids —
+      // refetch so the order's items carry real ids rather than the id-less local copy.
+      if(reloadOrders) await reloadOrders(); else setOrders(p=>p.map(o2=>o2.id===e.orderId?{...o2,items:localItems}:o2));
       setEditing(null);
       if(reloadProducts)  await reloadProducts();
       if(reloadInventory) await reloadInventory();
@@ -1303,7 +1305,12 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
     }
     const { error }=await supabase.rpc('revise_order',{ p_order_id:e.orderId, p_items });
     if(error){ alert('Could not save the changes:\n\n'+error.message); return; }
-    setOrders(p=>p.map(o=>o.id===e.orderId?{...o,items:localItems}:o));
+    // revise_order deletes and recreates the order's line items in the database, so
+    // they get brand-new ids. The batch picker keys everything by that id — reusing
+    // the old (now-stale) local items here would leave every line sharing an
+    // undefined id and scrambling the batch picker's per-item totals. Refetching
+    // gets the real new ids instead of guessing at them client-side.
+    if(reloadOrders) await reloadOrders(); else setOrders(p=>p.map(o=>o.id===e.orderId?{...o,items:localItems}:o));
     setEditing(null);
     if(reloadProducts) await reloadProducts();   // reservations changed
   }
@@ -2085,7 +2092,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
           {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
-          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory}/>}
+          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
          </TabErrorBoundary>
