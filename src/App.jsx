@@ -897,6 +897,39 @@ async function fetchProfile(userId) {
   return data;
 }
 
+// ==================== Storefront cache (instant repeat visits) ====================
+// The storefront can't render until products/categories/settings come back from
+// Singapore, which is the slowest part of a cold load from mainland China. We keep
+// the last successful response in the browser and paint from it immediately on the
+// next visit, then refresh from the database in the background and swap in the
+// fresh data ("stale-while-revalidate").
+//
+// We deliberately cache the RAW database rows, not mapped objects, so fromDbProduct
+// and friends stay the single source of truth for shape — a future field change
+// can't leave a stale mapped object lying around.
+//
+// Safety note on prices/stock: cached values are only ever used for the first paint
+// and are replaced within about a second by live data. Nothing is trusted for money
+// or stock — checkout re-checks availability and pricing on the server, so a stale
+// cache can never oversell or undercharge.
+const PUBLIC_CACHE_KEY = 'tod:public:v1';
+const PUBLIC_CACHE_MAX_AGE = 24 * 60 * 60 * 1000;   // ignore anything older than a day
+
+function readPublicCache(){
+  try{
+    const raw = localStorage.getItem(PUBLIC_CACHE_KEY);
+    if(!raw) return null;
+    const c = JSON.parse(raw);
+    if(!c || !c.t || Date.now() - c.t > PUBLIC_CACHE_MAX_AGE) return null;
+    return c;
+  }catch{ return null; }   // private mode / disabled storage / corrupt entry
+}
+function writePublicCache(prods, cats, settings){
+  try{
+    localStorage.setItem(PUBLIC_CACHE_KEY, JSON.stringify({t:Date.now(), prods, cats, settings}));
+  }catch{ /* quota or disabled storage — caching is best-effort, never fatal */ }
+}
+
 // ==================== Stage 4: Supabase <-> UI field mapping helpers ====================
 
 // Product images live in Supabase Storage (Singapore) but are served to shoppers
@@ -1332,10 +1365,10 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
                     </div>
                   </div>
                 )}
-                {o.tracking.length>0&&(
+                {o.tracking.some(tk=>tk&&String(tk).trim())&&(
                   <div style={{background:G.bl,borderRadius:8,padding:'8px 10px',fontSize:12,marginTop:10}}>
                     <div style={{fontWeight:'bold',color:G.bd,marginBottom:3}}>📦 {t('tracking')}</div>
-                    {o.tracking.map(tk=><div key={tk} style={{color:G.bd}}>{tk}</div>)}
+                    {o.tracking.filter(tk=>tk&&String(tk).trim()).map(tk=><div key={tk} style={{color:G.bd}}>{tk}</div>)}
                   </div>
                 )}
               </Card>
@@ -1826,12 +1859,31 @@ export default function App() {
     setInv(data.map(fromDbInv));
   },[]);
   useEffect(()=>{
+    // 1. Instant paint from the last visit's data (if we have it and it isn't stale).
+    //    This is what removes the "waiting on a blank store" feeling on repeat visits.
+    const cached = readPublicCache();
+    if(cached){
+      if(cached.prods) setProds(cached.prods.map(fromDbProduct));
+      if(cached.cats && cached.cats.length){
+        setCats(cached.cats.map(c=>c.name));
+        const cc={}; cached.cats.forEach(c=>{ cc[c.name]=c.color; }); setCatColors(cc);
+      }
+      if(cached.settings){
+        setCustomSlides(cached.settings.custom_slides || []);
+        setQrCodes(cached.settings.qr_codes || {alipay:'',wechat:''});
+      }
+    }
+    // 2. Always refresh from the database straight away and swap in the live data.
     async function loadPublicData(){
       const [prodRes, catRes, settingsRes] = await Promise.all([
         supabase.from('products').select('*').order('id'),
         supabase.from('categories').select('*').order('sort_order').order('name'),
         supabase.from('site_settings').select('*').eq('id',true).single(),
       ]);
+      // Only cache when everything came back cleanly, so we never persist a half-load.
+      if(!prodRes.error && !catRes.error && !settingsRes.error){
+        writePublicCache(prodRes.data, catRes.data, settingsRes.data);
+      }
       if(prodRes.error) console.error('loadProducts error:', prodRes.error.message);
       else setProds(prodRes.data.map(fromDbProduct));
       // Categories + their colours now come from the database instead of being
