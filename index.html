@@ -18,9 +18,59 @@
     <meta property="og:url" content="https://groupbuy.trade/" />
     <meta property="og:image" content="https://groupbuy.trade/banner-top.png" />
     <meta name="twitter:card" content="summary_large_image" />
+
+    <!--
+      Open the network connections early.
+      The browser normally only starts the DNS + TCP + TLS handshake for these hosts
+      when the app code finally asks for data or an image. On Chinese mobile networks
+      that handshake is often the single slowest part of the page. Starting it here,
+      in parallel with downloading the JavaScript, typically saves a few hundred
+      milliseconds before anything is even requested.
+
+      ⚠️ REPLACE "YOUR-PROJECT-REF" BELOW with your real Supabase project ref
+         (the same one in your VITE_SUPABASE_URL, e.g. https://abcdefgh.supabase.co).
+         If it's wrong the site still works — the hint is simply ignored.
+    -->
+    <link rel="preconnect" href="https://cdn.groupbuy.trade" crossorigin />
+    <link rel="dns-prefetch" href="https://cdn.groupbuy.trade" />
+    <link rel="preconnect" href="https://lictzpexgfepsvwpevmk.supabase.co" crossorigin />
+    <link rel="dns-prefetch" href="https://YOUR-PROJECT-REF.supabase.co" />
+
+    <style>
+      /* Paint something instantly.
+         Until now #root was empty, so shoppers saw a blank white screen for as long
+         as it took to download and start the app — which reads as "the site is broken
+         or slow" even when it isn't. This splash shows immediately from the HTML
+         itself (no JavaScript needed) and React silently replaces it the moment the
+         app mounts. */
+      html,body{margin:0;padding:0;background:#f4f6f4;}
+      #tod-splash{
+        position:fixed;inset:0;display:flex;flex-direction:column;
+        align-items:center;justify-content:center;gap:16px;
+        background:#f4f6f4;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      }
+      #tod-splash .tod-mark{
+        font-size:19px;font-weight:700;color:#0d522c;letter-spacing:.3px;text-align:center;
+      }
+      #tod-splash .tod-sub{font-size:12px;color:#7a857d;margin-top:-8px;}
+      #tod-splash .tod-ring{
+        width:34px;height:34px;border-radius:50%;
+        border:3px solid #d6e2d9;border-top-color:#0d522c;
+        animation:tod-spin .8s linear infinite;
+      }
+      @keyframes tod-spin{to{transform:rotate(360deg)}}
+      @media (prefers-reduced-motion:reduce){#tod-splash .tod-ring{animation-duration:2s}}
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Replaced by the app as soon as React mounts. -->
+      <div id="tod-splash">
+        <div class="tod-ring"></div>
+        <div class="tod-mark">🛒 Taste of Desh</div>
+        <div class="tod-sub">Loading your store…</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
