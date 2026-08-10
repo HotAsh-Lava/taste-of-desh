@@ -897,6 +897,38 @@ async function fetchProfile(userId) {
   return data;
 }
 
+// ==================== Referral code capture ====================
+// A friend arrives via a shared QR / link like  groupbuy.trade/?ref=AB3K9P
+// They may browse for a while and sign up later, so the code is stashed until the
+// account actually exists, then claimed once and cleared. Stored rather than kept
+// in memory so it survives the page reloads that happen during email verification.
+const REF_KEY='tod:ref';
+function captureRefFromUrl(){
+  try{
+    const p=new URLSearchParams(window.location.search);
+    const code=(p.get('ref')||'').trim().toUpperCase();
+    if(code&&/^[A-Z0-9]{4,12}$/.test(code)){
+      localStorage.setItem(REF_KEY,code);
+      // Tidy the address bar so the code isn't re-shared or bookmarked by accident.
+      p.delete('ref');
+      const q=p.toString();
+      window.history.replaceState({},'',window.location.pathname+(q?'?'+q:''));
+    }
+  }catch{}
+}
+function pendingRef(){ try{ return localStorage.getItem(REF_KEY)||''; }catch{ return ''; } }
+function clearRef(){ try{ localStorage.removeItem(REF_KEY); }catch{} }
+// Claim it after a successful signup. Never blocks or fails the signup itself —
+// a referral is a bonus, not a precondition for having an account.
+async function claimPendingReferral(){
+  const code=pendingRef();
+  if(!code) return;
+  try{
+    const { data }=await supabase.rpc('claim_referral',{p_code:code});
+    if(data!=='invalid_code') clearRef();   // keep it only if the code was mistyped
+  }catch{}
+}
+
 // ==================== Storefront cache (instant repeat visits) ====================
 // The storefront can't render until products/categories/settings come back from
 // Singapore, which is the slowest part of a cold load from mainland China. We keep
@@ -1154,6 +1186,9 @@ function AuthScreen({onLogin,t}) {
     });
     setBusy(false);
     if(error){alert(error.message);return;}
+    // New account exists now — if they arrived from a friend's referral link,
+    // record it. Deliberately after the account is created and never fatal.
+    await claimPendingReferral();
     await completeLogin(data.user.id, data.user.email);
   }
 
@@ -1250,6 +1285,8 @@ function AuthScreen({onLogin,t}) {
 function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   const [sec,setSec]=useState('main');
   const [openOrd,setOpenOrd]=useState(null);
+  const [rw,setRw]=useState(null);      // points/tier/referral summary
+  const [qrUrl,setQrUrl]=useState('');  // generated referral QR image
   const [na,setNa] = useState({name:'',mob:'',addr:''});
   const stC = {pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd},completed:{bg:G.gl,c:G.gd}};
   const [addrBusy,setAddrBusy]=useState(false);
@@ -1284,6 +1321,33 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
     if(error){ alert('Failed to delete address: '+error.message); return; }
     setAddrs(p=>p.filter(a=>a.id!==id));
   }
+  // Load the customer's own points/tier/referral summary once they're signed in.
+  useEffect(()=>{
+    if(!auth.loggedIn){ setRw(null); return; }
+    let alive=true;
+    (async()=>{
+      const { data,error }=await supabase.rpc('my_rewards');
+      if(alive&&!error) setRw(data);
+    })();
+    return ()=>{ alive=false; };
+  },[auth.loggedIn]);
+
+  // Build the referral QR only when the customer opens that screen.
+  useEffect(()=>{
+    if(sec!=='refer'||!rw||!rw.referral_code){ return; }
+    let alive=true;
+    (async()=>{
+      try{
+        const QR=(await import('qrcode')).default;
+        const url=`${window.location.origin}/?ref=${rw.referral_code}`;
+        const img=await QR.toDataURL(url,{width:520,margin:1,errorCorrectionLevel:'H',
+          color:{dark:'#0d522c',light:'#ffffff'}});
+        if(alive) setQrUrl(img);
+      }catch{}
+    })();
+    return ()=>{ alive=false; };
+  },[sec,rw]);
+
   async function doLogout(){
   await supabase.auth.signOut();
   setAuth({loggedIn:false,user:null});
@@ -1307,6 +1371,35 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
               </div>
             </div>
           </Card>
+          {rw&&rw.points_enabled&&(
+            <Card style={{marginBottom:12,background:'linear-gradient(135deg,#0d522c,#1a7346)',border:'none'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                <div>
+                  <div style={{color:'rgba(255,255,255,0.75)',fontSize:10,fontWeight:'bold',letterSpacing:1}}>MY POINTS</div>
+                  <div style={{color:G.gold,fontWeight:'bold',fontSize:24}}>⭐ {rw.points}</div>
+                  {rw.point_value>0&&<div style={{color:'rgba(255,255,255,0.8)',fontSize:11}}>≈ ¥{(rw.points*rw.point_value).toFixed(2)} off</div>}
+                </div>
+                <div style={{textAlign:'right'}}>
+                  <div style={{background:'rgba(255,255,255,0.18)',color:G.w,borderRadius:12,padding:'4px 12px',fontSize:12,fontWeight:'bold'}}>{rw.tier} Member</div>
+                  {rw.tier!=='Gold'&&(
+                    <div style={{color:'rgba(255,255,255,0.75)',fontSize:10,marginTop:5}}>
+                      ¥{Math.max(0,(rw.tier==='Bronze'?rw.silver_at:rw.gold_at)-rw.lifetime_spend).toFixed(0)} more to {rw.tier==='Bronze'?'Silver':'Gold'}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Card>
+          )}
+          {rw&&rw.ref_enabled&&(
+            <div onClick={()=>setSec('refer')} style={{cursor:'pointer',marginBottom:12,borderRadius:12,padding:'14px 16px',
+                background:'linear-gradient(135deg,#1a7346,#2d9d63)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10}}>
+              <div>
+                <div style={{color:G.w,fontWeight:'bold',fontSize:14}}>🎁 Refer a Friend</div>
+                <div style={{color:'rgba(255,255,255,0.85)',fontSize:11,marginTop:2}}>Share your code &amp; win prizes</div>
+              </div>
+              <span style={{color:G.gold,fontSize:20}}>›</span>
+            </div>
+          )}
           {[{icon:'📦',label:t('myOrders'),cnt:orders.length,s:'orders'},{icon:'📍',label:t('savedAddresses'),cnt:addrs.length,s:'addrs'},{icon:'🌐',label:t('language'),cnt:null,s:'lang'},{icon:'💬',label:t('customerSupport'),cnt:null,s:'support'}].map(it=>(
             <div key={it.s} onClick={()=>setSec(it.s)} style={{background:G.w,borderRadius:13,padding:15,marginBottom:10,display:'flex',alignItems:'center',gap:12,cursor:'pointer',boxShadow:'0 2px 6px rgba(20,40,25,0.06)',border:`1px solid ${G.brd}`}}>
               <div style={{fontSize:26}}>{it.icon}</div>
@@ -1428,6 +1521,70 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
           ))}
         </div>
       )}
+      {sec==='refer'&&rw&&(
+        <div>
+          <div onClick={()=>setSec('main')} style={{cursor:'pointer',color:G.gd,fontWeight:'bold',fontSize:13,marginBottom:12}}>‹ Back</div>
+
+          {/* Poster-style share card — mirrors the printed flyer so the two feel like one brand. */}
+          <div style={{background:'linear-gradient(160deg,#1a7346,#0d522c)',borderRadius:16,padding:'20px 16px',textAlign:'center',marginBottom:14}}>
+            <div style={{color:G.gold,fontWeight:'bold',fontSize:20,letterSpacing:1}}>TASTE OF DESH</div>
+            <div style={{color:'rgba(255,255,255,0.85)',fontSize:10,letterSpacing:2,marginTop:2}}>A HEART OF BANGLADESH IN CHINA</div>
+
+            <div style={{background:G.w,borderRadius:14,padding:12,display:'inline-block',margin:'16px 0 10px'}}>
+              {qrUrl
+                ? <img src={qrUrl} alt="My referral QR code" style={{width:200,height:200,display:'block'}}/>
+                : <div style={{width:200,height:200,display:'flex',alignItems:'center',justifyContent:'center',color:G.mut,fontSize:12}}>Generating…</div>}
+            </div>
+
+            <div style={{color:G.w,fontSize:11,marginBottom:4}}>Scan to join &amp; shop</div>
+            <div style={{color:G.gold,fontWeight:'bold',fontSize:26,letterSpacing:3}}>{rw.referral_code}</div>
+            <div style={{color:'rgba(255,255,255,0.8)',fontSize:11,marginTop:8}}>
+              Your friend gets <b style={{color:G.gold}}>¥{rw.ref_friend_discount}</b> off their first order over ¥{rw.ref_min_order}
+            </div>
+          </div>
+
+          <Card style={{marginBottom:12}}>
+            <div style={{display:'flex',justifyContent:'space-around',textAlign:'center'}}>
+              <div>
+                <div style={{fontWeight:'bold',fontSize:22,color:G.gd}}>{rw.referrals_qualified}</div>
+                <div style={{fontSize:11,color:G.mut}}>Friends joined</div>
+              </div>
+              <div style={{width:1,background:G.brd}}/>
+              <div>
+                <div style={{fontWeight:'bold',fontSize:22,color:G.bd}}>{rw.referrals_total}</div>
+                <div style={{fontSize:11,color:G.mut}}>Invites used</div>
+              </div>
+            </div>
+          </Card>
+
+          <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:14}}>
+            <button onClick={async()=>{
+              const link=`${window.location.origin}/?ref=${rw.referral_code}`;
+              try{
+                if(navigator.share){ await navigator.share({title:'Taste of Desh',text:`Shop Bangladeshi groceries in China — use my code ${rw.referral_code}`,url:link}); }
+                else { await navigator.clipboard.writeText(link); alert('Invite link copied!'); }
+              }catch{}
+            }} style={{flex:'1 1 140px',background:G.gm,color:G.w,border:'none',borderRadius:9,padding:'12px',fontWeight:'bold',fontSize:13,cursor:'pointer'}}>📤 Share Invite Link</button>
+            {qrUrl&&(
+              <a href={qrUrl} download={`taste-of-desh-${rw.referral_code}.png`}
+                style={{flex:'1 1 140px',background:G.w,color:G.gd,border:`1.5px solid ${G.gm}`,borderRadius:9,padding:'12px',fontWeight:'bold',fontSize:13,textAlign:'center',textDecoration:'none'}}>⬇️ Save QR Image</a>
+            )}
+          </div>
+
+          <Card>
+            <div style={{fontWeight:'bold',fontSize:13,color:G.gd,marginBottom:8}}>How it works</div>
+            {[['1','Share your QR code or invite link with friends and family.'],
+              ['2',`They sign up and place their first order over ¥${rw.ref_min_order} — and save ¥${rw.ref_friend_discount}.`],
+              ['3','Once their order is delivered, you earn reward points automatically.']].map(([n,txt])=>(
+              <div key={n} style={{display:'flex',gap:10,marginBottom:8,alignItems:'flex-start'}}>
+                <div style={{width:22,height:22,borderRadius:'50%',background:G.gl,color:G.gd,fontWeight:'bold',fontSize:12,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>{n}</div>
+                <div style={{fontSize:12,color:G.tx,lineHeight:1.5}}>{txt}</div>
+              </div>
+            ))}
+          </Card>
+        </div>
+      )}
+
       {sec==='support'&&(
         <div>
           <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,cursor:'pointer'}} onClick={()=>setSec('main')}><span style={{fontSize:20}}>‹</span><span style={{fontWeight:'bold',fontSize:15}}>{t('customerSupport')}</span></div>
@@ -1859,6 +2016,8 @@ export default function App() {
     setInv(data.map(fromDbInv));
   },[]);
   useEffect(()=>{
+    // Grab ?ref=CODE before anything else touches the URL.
+    captureRefFromUrl();
     // 1. Instant paint from the last visit's data (if we have it and it isn't stale).
     //    This is what removes the "waiting on a blank store" feeling on repeat visits.
     const cached = readPublicCache();
