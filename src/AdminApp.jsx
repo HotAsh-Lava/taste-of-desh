@@ -1957,6 +1957,555 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   );
 }
 
+// Tier badge colours — Bronze/Silver/Gold.
+const tierBg=(t)=>t==='Gold'?'#FFF4CC':t==='Silver'?'#ECEFF1':'#F6E7D8';
+const tierFg=(t)=>t==='Gold'?'#8a6d00':t==='Silver'?'#546E7A':'#8D5524';
+
+// ==================== Customers ====================
+// Everyone who has signed up, with the contact details they saved and a quick read
+// on how much business they've done. The data comes from the admin_list_customers
+// RPC rather than a plain table read, because verification status lives in the
+// protected auth schema and the order/spend totals need a server-side join.
+function CustTab() {
+  const [rows,setRows]=useState(null);   // null = still loading
+  const [err,setErr]=useState('');
+  const [q,setQ]=useState('');
+  const [only,setOnly]=useState('all');  // all | verified | unverified
+  const [openId,setOpenId]=useState(null);
+  const [st,setSt]=useState(null);       // loyalty_settings row
+  const [showSt,setShowSt]=useState(false);
+  const [savingSt,setSavingSt]=useState(false);
+  const [adj,setAdj]=useState(null);     // {id,name,delta,note}
+
+  async function loadCustomers(){
+    const { data, error }=await supabase.rpc('admin_list_customers');
+    if(error){ setErr(error.message); setRows([]); return; }
+    setErr(''); setRows(data||[]);
+  }
+  useEffect(()=>{
+    let alive=true;
+    (async()=>{
+      const [{data,error},sres]=await Promise.all([
+        supabase.rpc('admin_list_customers'),
+        supabase.from('loyalty_settings').select('*').eq('id',true).single(),
+      ]);
+      if(!alive) return;
+      if(error){ setErr(error.message); setRows([]); } else { setRows(data||[]); }
+      if(!sres.error) setSt(sres.data);
+    })();
+    return ()=>{ alive=false; };
+  },[]);
+
+  const stField=(k,v)=>setSt(s=>({...s,[k]:v}));
+  async function saveSettings(){
+    setSavingSt(true);
+    try{
+      const { error }=await supabase.rpc('admin_save_loyalty_settings',{p:st});
+      if(error) alert('Could not save settings:\n\n'+error.message);
+      else alert('Settings saved.');
+    } finally { setSavingSt(false); }
+  }
+  async function applyAdjust(){
+    const d=parseInt(adj.delta,10);
+    if(!d){ alert('Enter a non-zero number of points (use a minus sign to deduct).'); return; }
+    const { error }=await supabase.rpc('admin_adjust_points',{p_customer:adj.id,p_delta:d,p_note:adj.note||null});
+    if(error){ alert('Could not adjust points:\n\n'+error.message); return; }
+    setAdj(null);
+    await loadCustomers();
+  }
+
+  const list=useMemo(()=>{
+    let r=rows||[];
+    if(only==='verified')   r=r.filter(c=>c.verified);
+    if(only==='unverified') r=r.filter(c=>!c.verified);
+    if(q.trim()){
+      const lq=q.trim().toLowerCase();
+      r=r.filter(c=>
+        (c.full_name||'').toLowerCase().includes(lq) ||
+        (c.mobile||'').toLowerCase().includes(lq) ||
+        (c.email||'').toLowerCase().includes(lq) ||
+        JSON.stringify(c.addresses||[]).toLowerCase().includes(lq)
+      );
+    }
+    return r;
+  },[rows,q,only]);
+
+  const totals=useMemo(()=>{
+    const r=rows||[];
+    return {
+      all:r.length,
+      verified:r.filter(c=>c.verified).length,
+      buyers:r.filter(c=>(c.order_count||0)>0).length,
+      revenue:r.reduce((s,c)=>s+(+c.total_spent||0),0),
+    };
+  },[rows]);
+
+  const fmtDate=(ts)=>ts?String(ts).slice(0,10):'—';
+
+  if(rows===null) return <Card><div style={{textAlign:'center',padding:40,color:G.mut}}>Loading customers…</div></Card>;
+
+  return(
+    <div>
+      <h2 style={{margin:'0 0 14px',fontSize:19,color:G.gd}}>👥 Customers</h2>
+      {err&&<Card style={{marginBottom:12}}><div style={{color:G.rd,fontSize:13}}>Could not load customers: {err}</div></Card>}
+
+      {/* Program settings — every rate is set here, nothing is hard-coded. */}
+      <Card style={{marginBottom:12}}>
+        <div onClick={()=>setShowSt(v=>!v)} style={{cursor:'pointer',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span style={{fontWeight:'bold',fontSize:14,color:G.gd}}>⚙️ Points &amp; Referral Settings</span>
+          <span style={{fontSize:12,color:G.mut}}>
+            {st?`Points ${st.points_enabled?'ON':'OFF'} · Referrals ${st.ref_enabled?'ON':'OFF'}`:'…'} {showSt?'▾':'▸'}
+          </span>
+        </div>
+        {showSt&&st&&(
+          <div style={{marginTop:12,borderTop:`1px solid ${G.brd}`,paddingTop:12}}>
+            <div style={{fontSize:11,color:G.mut,marginBottom:10}}>
+              Set these once you know your post-launch margin. Nothing is applied to customers while a program is switched off.
+            </div>
+            <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:12}}>
+              <label style={{fontSize:13,display:'flex',alignItems:'center',gap:6,fontWeight:'bold',color:G.tx}}>
+                <input type="checkbox" checked={!!st.points_enabled} onChange={e=>stField('points_enabled',e.target.checked)}/> Points program active
+              </label>
+              <label style={{fontSize:13,display:'flex',alignItems:'center',gap:6,fontWeight:'bold',color:G.tx}}>
+                <input type="checkbox" checked={!!st.ref_enabled} onChange={e=>stField('ref_enabled',e.target.checked)}/> Referral program active
+              </label>
+            </div>
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>EARNING &amp; REDEEMING</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:10,marginBottom:12}}>
+              {[
+                ['points_per_yuan','Points earned per ¥1','number'],
+                ['yuan_per_point','¥ value of 1 point','number'],
+                ['redeem_cap_yuan','Max ¥ off per order','number'],
+                ['redeem_max_pct','Max % of subtotal','number'],
+                ['points_expiry_months','Points expire after (months, 0 = never)','number'],
+              ].map(([k,l])=>(
+                <div key={k}>
+                  <div style={{fontSize:11,color:G.mut,marginBottom:3}}>{l}</div>
+                  <input type="number" step="0.01" value={st[k]??''} onChange={e=>stField(k,e.target.value)}
+                    style={{width:'100%',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+                </div>
+              ))}
+              <div style={{display:'flex',alignItems:'flex-end'}}>
+                <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,color:G.tx}}>
+                  <input type="checkbox" checked={!!st.earn_on_courier} onChange={e=>stField('earn_on_courier',e.target.checked)}/> Earn points on courier too
+                </label>
+              </div>
+            </div>
+            {st.yuan_per_point>0&&(
+              <div style={{fontSize:11,color:G.mut,marginBottom:12,background:G.bg,padding:'7px 10px',borderRadius:6}}>
+                At these rates a ¥100 order earns <b>{Math.round(100*(+st.points_per_yuan||0))} points</b>, worth about <b>¥{(100*(+st.points_per_yuan||0)*(+st.yuan_per_point||0)).toFixed(2)}</b> — roughly <b>{(100*(+st.points_per_yuan||0)*(+st.yuan_per_point||0)).toFixed(1)}%</b> back.
+              </div>
+            )}
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>TIERS (lifetime spend)</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:12}}>
+              {[['silver_at','Silver from ¥'],['gold_at','Gold from ¥'],
+                ['bronze_mult','Bronze earn ×'],['silver_mult','Silver earn ×'],['gold_mult','Gold earn ×']].map(([k,l])=>(
+                <div key={k}>
+                  <div style={{fontSize:11,color:G.mut,marginBottom:3}}>{l}</div>
+                  <input type="number" step="0.01" value={st[k]??''} onChange={e=>stField(k,e.target.value)}
+                    style={{width:'100%',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+                </div>
+              ))}
+            </div>
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>REFERRALS</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:10,marginBottom:12}}>
+              {[['ref_friend_discount','¥ off friend\'s first order'],
+                ['ref_min_order','Friend\'s order must reach ¥'],
+                ['ref_referrer_points','Points to referrer after it completes']].map(([k,l])=>(
+                <div key={k}>
+                  <div style={{fontSize:11,color:G.mut,marginBottom:3}}>{l}</div>
+                  <input type="number" step="0.01" value={st[k]??''} onChange={e=>stField(k,e.target.value)}
+                    style={{width:'100%',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+                </div>
+              ))}
+            </div>
+            <Btn onClick={saveSettings} disabled={savingSt}>{savingSt?'Saving…':'💾 Save Settings'}</Btn>
+          </div>
+        )}
+      </Card>
+
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:14}}>
+        <Stat icon="👥" label="Total Signups" value={totals.all}/>
+        <Stat icon="✅" label="Verified" value={totals.verified}/>
+        <Stat icon="🛍️" label="Have Ordered" value={totals.buyers}/>
+        <Stat icon="💰" label="Lifetime Revenue (¥)" value={`¥${totals.revenue.toFixed(2)}`}/>
+      </div>
+
+      <Card style={{marginBottom:12}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+          <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search name, mobile, email or address…"
+            style={{flex:'1 1 240px',padding:'9px 12px',borderRadius:7,border:`1px solid ${G.brd}`,fontSize:13}}/>
+          {[['all','All'],['verified','Verified'],['unverified','Unverified']].map(([k,l])=>(
+            <button key={k} onClick={()=>setOnly(k)} style={{
+              background:only===k?G.gm:G.w,color:only===k?G.w:G.tx,
+              border:`1px solid ${only===k?G.gm:G.brd}`,borderRadius:7,padding:'8px 14px',
+              cursor:'pointer',fontSize:12,fontWeight:'bold'}}>{l}</button>
+          ))}
+        </div>
+      </Card>
+
+      {list.length===0
+        ? <Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No customers match this search</div></Card>
+        : list.map(c=>{
+            const open=openId===c.id;
+            const addrs=Array.isArray(c.addresses)?c.addresses:[];
+            return(
+              <Card key={c.id} style={{marginBottom:10}}>
+                <div onClick={()=>setOpenId(open?null:c.id)} style={{cursor:'pointer',display:'flex',justifyContent:'space-between',gap:10,alignItems:'flex-start',flexWrap:'wrap'}}>
+                  <div style={{minWidth:0,flex:'1 1 220px'}}>
+                    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                      <span style={{fontWeight:'bold',fontSize:14,color:G.gd}}>{c.full_name||'(no name)'}</span>
+                      <span style={{background:tierBg(c.tier),color:tierFg(c.tier),borderRadius:9,padding:'2px 8px',fontSize:10,fontWeight:'bold'}}>
+                        {c.tier||'Bronze'}
+                      </span>
+                      <span style={{background:c.verified?G.gl:G.goldl,color:c.verified?G.gd:'#8a6d00',borderRadius:9,padding:'2px 8px',fontSize:10,fontWeight:'bold'}}>
+                        {c.verified?'✅ Verified':'⏳ Unverified'}
+                      </span>
+                      <span style={{color:G.mut,fontSize:12}}>{open?'▾':'▸'}</span>
+                    </div>
+                    <div style={{fontSize:12,color:G.tx,marginTop:3}}>📱 {c.mobile||'—'}</div>
+                    <div style={{fontSize:11,color:G.mut,marginTop:2}}>✉️ {c.email||'—'}</div>
+                  </div>
+                  <div style={{textAlign:'right',flex:'0 0 auto'}}>
+                    <div style={{fontWeight:'bold',fontSize:15,color:G.gd}}>¥{(+c.total_spent||0).toFixed(2)}</div>
+                    <div style={{fontSize:11,color:G.mut}}>{c.order_count||0} order{(c.order_count||0)!==1?'s':''}</div>
+                    <div style={{fontSize:11,color:G.bd,fontWeight:'bold',marginTop:2}}>⭐ {c.points||0} pts</div>
+                    <div style={{fontSize:10,color:G.mut,marginTop:2}}>Joined {fmtDate(c.created_at)}</div>
+                  </div>
+                </div>
+                {open&&(
+                  <div style={{marginTop:10,borderTop:`1px solid ${G.brd}`,paddingTop:10}}>
+                    <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>📍 Saved Addresses ({addrs.length})</div>
+                    {addrs.length===0
+                      ? <div style={{fontSize:12,color:G.mut}}>No address saved yet.</div>
+                      : addrs.map((a,i)=>(
+                          <div key={i} style={{background:G.bg,borderRadius:7,padding:'7px 10px',marginBottom:5,fontSize:12}}>
+                            <div style={{fontWeight:'bold',color:G.tx}}>{a.name||'—'} <span style={{fontWeight:'normal',color:G.mut}}>· {a.mobile||'—'}</span></div>
+                            <div style={{color:G.tx,marginTop:2}}>{a.address||'—'}</div>
+                          </div>
+                        ))}
+                    <div style={{fontSize:11,color:G.mut,marginTop:8}}>Last sign-in: {fmtDate(c.last_sign_in_at)}</div>
+
+                    <div style={{marginTop:10,borderTop:`1px dashed ${G.brd}`,paddingTop:10,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10}}>
+                      <div style={{background:G.bg,borderRadius:7,padding:'8px 10px'}}>
+                        <div style={{fontSize:10,color:G.mut,marginBottom:2}}>REFERRAL CODE</div>
+                        <div style={{fontWeight:'bold',fontSize:15,color:G.gd,letterSpacing:1}}>{c.referral_code||'—'}</div>
+                      </div>
+                      <div style={{background:G.bg,borderRadius:7,padding:'8px 10px'}}>
+                        <div style={{fontSize:10,color:G.mut,marginBottom:2}}>REFERRALS</div>
+                        <div style={{fontWeight:'bold',fontSize:15,color:G.gd}}>
+                          {c.referrals_qualified||0} <span style={{fontSize:11,fontWeight:'normal',color:G.mut}}>qualified / {c.referrals_total||0} total</span>
+                        </div>
+                      </div>
+                      <div style={{background:G.bg,borderRadius:7,padding:'8px 10px'}}>
+                        <div style={{fontSize:10,color:G.mut,marginBottom:2}}>POINTS BALANCE</div>
+                        <div style={{fontWeight:'bold',fontSize:15,color:G.bd}}>⭐ {c.points||0}</div>
+                      </div>
+                    </div>
+
+                    {adj&&adj.id===c.id
+                      ? <div style={{marginTop:10,background:G.bl,borderRadius:7,padding:10}}>
+                          <div style={{fontSize:11,color:G.bd,fontWeight:'bold',marginBottom:6}}>Adjust points for {adj.name}</div>
+                          <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+                            <input type="number" value={adj.delta} onChange={e=>setAdj(a=>({...a,delta:e.target.value}))}
+                              placeholder="e.g. 500 or -200" style={{width:130,padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+                            <input value={adj.note} onChange={e=>setAdj(a=>({...a,note:e.target.value}))}
+                              placeholder="Reason (e.g. competition prize)" style={{flex:'1 1 180px',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+                            <Btn sm onClick={applyAdjust}>Apply</Btn>
+                            <button onClick={()=>setAdj(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 12px',cursor:'pointer',fontSize:12}}>Cancel</button>
+                          </div>
+                          <div style={{fontSize:10,color:G.mut,marginTop:6}}>Use a minus sign to deduct. Every adjustment is recorded in the points history.</div>
+                        </div>
+                      : <div style={{marginTop:10}}>
+                          <Btn v='info' sm onClick={()=>setAdj({id:c.id,name:c.full_name||'this customer',delta:'',note:''})}>⭐ Adjust Points</Btn>
+                        </div>}
+                  </div>
+                )}
+              </Card>
+            );
+          })}
+    </div>
+  );
+}
+
+// ==================== Competitions & Coupons ====================
+// Fully flexible: you set the name, the date range, whether it ranks by spending or
+// referrals, and however many prize places you want. The leaderboard is computed
+// live from real sales/referral data, and a winner can be paid out as a personal
+// coupon in one click.
+function CompTab() {
+  const [comps,setComps]=useState(null);
+  const [coupons,setCoupons]=useState([]);
+  const [form,setForm]=useState(null);       // competition being created/edited
+  const [board,setBoard]=useState(null);     // {comp, rows}
+  const [cform,setCform]=useState(null);     // coupon being issued
+  const [busy,setBusy]=useState(false);
+
+  async function loadAll(){
+    const [c,cp]=await Promise.all([
+      supabase.from('competitions').select('*').order('starts_on',{ascending:false}),
+      supabase.rpc('admin_list_coupons'),
+    ]);
+    setComps(c.error?[]:(c.data||[]));
+    setCoupons(cp.error?[]:(cp.data||[]));
+  }
+  useEffect(()=>{ loadAll(); },[]);
+
+  const blank=()=>({id:'',name:'',kind:'referral',starts_on:bjDate(),ends_on:bjDate(),status:'draft',
+                    prizes:[{place:1,label:'1st Prize',amount:50}]});
+
+  function setPrize(i,k,v){ setForm(f=>({...f,prizes:f.prizes.map((p,j)=>j===i?{...p,[k]:v}:p)})); }
+  function addPrize(){ setForm(f=>({...f,prizes:[...f.prizes,{place:f.prizes.length+1,label:`${f.prizes.length+1}th Prize`,amount:10}]})); }
+  function delPrize(i){ setForm(f=>({...f,prizes:f.prizes.filter((_,j)=>j!==i).map((p,j)=>({...p,place:j+1}))})); }
+
+  async function saveComp(){
+    if(!form.name.trim()){ alert('Give the competition a name.'); return; }
+    if(new Date(form.ends_on)<new Date(form.starts_on)){ alert('The end date is before the start date.'); return; }
+    setBusy(true);
+    try{
+      const payload={...form, prizes:form.prizes.map(p=>({...p,amount:+p.amount||0}))};
+      if(!payload.id) delete payload.id;
+      const { error }=await supabase.rpc('admin_save_competition',{p:payload});
+      if(error){ alert('Could not save:\n\n'+error.message); return; }
+      setForm(null); await loadAll();
+    } finally { setBusy(false); }
+  }
+  async function delComp(c){
+    if(!window.confirm(`Delete "${c.name}"? This cannot be undone.`)) return;
+    const { error }=await supabase.rpc('admin_delete_competition',{p_id:c.id});
+    if(error){ alert(error.message); return; }
+    await loadAll();
+  }
+  async function openBoard(c){
+    setBoard({comp:c,rows:null});
+    const { data,error }=await supabase.rpc('admin_competition_leaderboard',{p_id:c.id});
+    setBoard({comp:c,rows:error?[]:(data||[]),err:error?error.message:''});
+  }
+  async function issueCoupon(){
+    if(!cform.code.trim()||!cform.value){ alert('A coupon needs a code and a value.'); return; }
+    setBusy(true);
+    try{
+      const { error }=await supabase.rpc('admin_issue_coupon',{p:cform});
+      if(error){ alert('Could not create coupon:\n\n'+error.message); return; }
+      setCform(null); await loadAll();
+    } finally { setBusy(false); }
+  }
+  async function toggleCoupon(cp){
+    const { error }=await supabase.rpc('admin_set_coupon_active',{p_id:cp.id,p_active:!cp.active});
+    if(error){ alert(error.message); return; }
+    await loadAll();
+  }
+  const randCode=()=>'TOD'+Math.random().toString(36).slice(2,7).toUpperCase();
+
+  if(comps===null) return <Card><div style={{textAlign:'center',padding:40,color:G.mut}}>Loading…</div></Card>;
+
+  const stC={draft:{bg:G.bg,c:G.mut},running:{bg:G.gl,c:G.gd},closed:{bg:G.goldl,c:'#8a6d00'}};
+
+  return(
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
+        <h2 style={{margin:0,fontSize:19,color:G.gd}}>🏆 Competitions</h2>
+        <Btn onClick={()=>setForm(blank())}>+ New Competition</Btn>
+      </div>
+
+      {form&&(
+        <Overlay title={form.id?'Edit competition':'New competition'} onClose={()=>setForm(null)} width={620}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:10,marginBottom:12}}>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Name</div>
+              <input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. October Referral Race"
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Ranked by</div>
+              <select value={form.kind} onChange={e=>setForm(f=>({...f,kind:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}>
+                <option value="referral">Referrals (new customers brought in)</option>
+                <option value="spending">Spending (¥ spent in the period)</option>
+              </select>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Starts</div>
+              <input type="date" value={form.starts_on} onChange={e=>setForm(f=>({...f,starts_on:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Ends</div>
+              <input type="date" value={form.ends_on} onChange={e=>setForm(f=>({...f,ends_on:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Status</div>
+              <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}>
+                <option value="draft">Draft (not visible yet)</option>
+                <option value="running">Running</option>
+                <option value="closed">Closed</option>
+              </select>
+            </div>
+          </div>
+
+          <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>PRIZES</div>
+          {form.prizes.map((p,i)=>(
+            <div key={i} style={{display:'flex',gap:8,marginBottom:6,alignItems:'center',flexWrap:'wrap'}}>
+              <span style={{width:24,textAlign:'center',fontWeight:'bold',color:G.gd}}>{i+1}</span>
+              <input value={p.label} onChange={e=>setPrize(i,'label',e.target.value)} placeholder="Prize name"
+                style={{flex:'1 1 150px',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+              <input type="number" value={p.amount} onChange={e=>setPrize(i,'amount',e.target.value)} placeholder="¥"
+                style={{width:90,padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+              <button onClick={()=>delPrize(i)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.rd,borderRadius:6,padding:'6px 10px',cursor:'pointer',fontSize:12}}>✕</button>
+            </div>
+          ))}
+          <button onClick={addPrize} style={{background:G.w,border:`1px dashed ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 12px',cursor:'pointer',fontSize:12,marginBottom:12}}>+ Add prize place</button>
+
+          <div style={{display:'flex',gap:8}}>
+            <Btn onClick={saveComp} disabled={busy}>{busy?'Saving…':'💾 Save'}</Btn>
+            <button onClick={()=>setForm(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+          </div>
+        </Overlay>
+      )}
+
+      {board&&(
+        <Overlay title={`${board.comp.name} — leaderboard`} onClose={()=>setBoard(null)} width={620}>
+          <div style={{fontSize:12,color:G.mut,marginBottom:10}}>
+            {board.comp.kind==='spending'?'Ranked by ¥ spent':'Ranked by qualified referrals'} · {board.comp.starts_on} → {board.comp.ends_on}
+          </div>
+          {board.rows===null
+            ? <div style={{padding:20,textAlign:'center',color:G.mut}}>Loading…</div>
+            : board.rows.length===0
+              ? <div style={{padding:20,textAlign:'center',color:G.mut}}>No qualifying activity in this period yet.</div>
+              : board.rows.map((r,i)=>{
+                  const prize=(board.comp.prizes||[]).find(p=>+p.place===+r.rank);
+                  return(
+                    <div key={r.customer_id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,
+                        padding:'9px 10px',borderRadius:7,marginBottom:5,background:i%2?G.w:G.bg,flexWrap:'wrap'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:9,minWidth:0}}>
+                        <span style={{fontWeight:'bold',color:G.gd,width:22}}>#{r.rank}</span>
+                        <div style={{minWidth:0}}>
+                          <div style={{fontWeight:'bold',fontSize:13,color:G.tx}}>{r.name||'(no name)'}</div>
+                          <div style={{fontSize:11,color:G.mut}}>{r.mobile||'—'}</div>
+                        </div>
+                      </div>
+                      <div style={{display:'flex',alignItems:'center',gap:8}}>
+                        <span style={{fontWeight:'bold',color:G.bd,fontSize:14}}>
+                          {board.comp.kind==='spending'?`¥${(+r.score).toFixed(2)}`:`${+r.score} refs`}
+                        </span>
+                        {prize&&(
+                          <Btn sm onClick={()=>setCform({code:randCode(),kind:'fixed',value:prize.amount,min_order:0,
+                            customer_id:r.customer_id,max_uses:1,starts_on:'',expires_on:'',
+                            note:`${prize.label} — ${board.comp.name}`})}>🎁 {prize.label}</Btn>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+          {board.err&&<div style={{color:G.rd,fontSize:12,marginTop:8}}>{board.err}</div>}
+        </Overlay>
+      )}
+
+      {cform&&(
+        <Overlay title="Issue coupon" onClose={()=>setCform(null)} width={520}>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10,marginBottom:12}}>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Code</div>
+              <input value={cform.code} onChange={e=>setCform(f=>({...f,code:e.target.value.toUpperCase()}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13,fontWeight:'bold',letterSpacing:1}}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Type</div>
+              <select value={cform.kind} onChange={e=>setCform(f=>({...f,kind:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}>
+                <option value="fixed">¥ off</option><option value="percent">% off</option>
+              </select>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Value</div>
+              <input type="number" value={cform.value} onChange={e=>setCform(f=>({...f,value:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Minimum order ¥</div>
+              <input type="number" value={cform.min_order} onChange={e=>setCform(f=>({...f,min_order:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            </div>
+            <div>
+              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Expires on</div>
+              <input type="date" value={cform.expires_on} onChange={e=>setCform(f=>({...f,expires_on:e.target.value}))}
+                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            </div>
+          </div>
+          <div style={{fontSize:11,color:G.mut,marginBottom:10}}>
+            {cform.customer_id?'This coupon is locked to the selected customer.':'Not tied to a customer — anyone with the code can use it.'}
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <Btn onClick={issueCoupon} disabled={busy}>{busy?'Creating…':'🎁 Create Coupon'}</Btn>
+            <button onClick={()=>setCform(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+          </div>
+        </Overlay>
+      )}
+
+      {comps.length===0
+        ? <Card style={{marginBottom:16}}><div style={{textAlign:'center',padding:34,color:G.mut}}>No competitions yet. Create one to start a referral race or a spending contest.</div></Card>
+        : comps.map(c=>{
+            const s=stC[c.status]||stC.draft;
+            return(
+              <Card key={c.id} style={{marginBottom:10}}>
+                <div style={{display:'flex',justifyContent:'space-between',gap:10,flexWrap:'wrap',alignItems:'flex-start'}}>
+                  <div>
+                    <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                      <span style={{fontWeight:'bold',fontSize:15,color:G.gd}}>{c.name}</span>
+                      <span style={{background:s.bg,color:s.c,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>{c.status}</span>
+                      <span style={{background:G.bl,color:G.bd,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>
+                        {c.kind==='spending'?'💰 Spending':'👥 Referrals'}
+                      </span>
+                    </div>
+                    <div style={{fontSize:11,color:G.mut,marginTop:4}}>{c.starts_on} → {c.ends_on}</div>
+                    <div style={{fontSize:12,color:G.tx,marginTop:4}}>
+                      {(c.prizes||[]).map(p=>`${p.label}: ¥${p.amount}`).join(' · ')||'No prizes set'}
+                    </div>
+                  </div>
+                  <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                    <Btn sm onClick={()=>openBoard(c)}>🏆 Leaderboard</Btn>
+                    <Btn v='info' sm onClick={()=>setForm({...c,prizes:c.prizes&&c.prizes.length?c.prizes:[{place:1,label:'1st Prize',amount:50}]})}>✏️ Edit</Btn>
+                    <Btn v='danger' sm onClick={()=>delComp(c)}>Delete</Btn>
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+
+      <h2 style={{margin:'22px 0 12px',fontSize:19,color:G.gd}}>🎁 Coupons</h2>
+      <div style={{marginBottom:10}}>
+        <Btn v='info' onClick={()=>setCform({code:randCode(),kind:'fixed',value:'',min_order:0,customer_id:'',max_uses:1,starts_on:'',expires_on:'',note:''})}>+ New Coupon</Btn>
+      </div>
+      {coupons.length===0
+        ? <Card><div style={{textAlign:'center',padding:30,color:G.mut}}>No coupons yet.</div></Card>
+        : coupons.map(cp=>(
+            <Card key={cp.id} style={{marginBottom:8}}>
+              <div style={{display:'flex',justifyContent:'space-between',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+                <div>
+                  <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                    <span style={{fontWeight:'bold',fontSize:14,color:G.gd,letterSpacing:1}}>{cp.code}</span>
+                    <span style={{background:cp.active?G.gl:G.bg,color:cp.active?G.gd:G.mut,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>
+                      {cp.active?'Active':'Disabled'}
+                    </span>
+                  </div>
+                  <div style={{fontSize:12,color:G.tx,marginTop:3}}>
+                    {cp.kind==='percent'?`${cp.value}% off`:`¥${cp.value} off`}
+                    {+cp.min_order>0?` · min ¥${cp.min_order}`:''}
+                    {cp.expires_on?` · expires ${cp.expires_on}`:''}
+                    {` · used ${cp.used_count||0}/${cp.max_uses||1}`}
+                  </div>
+                  {cp.note&&<div style={{fontSize:11,color:G.mut,marginTop:2}}>{cp.note}</div>}
+                </div>
+                <Btn v={cp.active?'danger':'info'} sm onClick={()=>toggleCoupon(cp)}>{cp.active?'Disable':'Enable'}</Btn>
+              </div>
+            </Card>
+          ))}
+    </div>
+  );
+}
+
 function SLTab({sales,setSales,prods,reloadProducts,reloadInventory,reloadOrders}) {
   const [q,setQ]=useState('');
   const [exp,setExp]=useState(new Set());
@@ -2066,6 +2615,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
     {id:'dash',icon:'📊',l:'Dashboard'},{id:'prods',icon:'📋',l:'Product List'},{id:'inv',icon:'🏭',l:'Inventory'},
     {id:'pi',icon:'🧾',l:'Purchase Invoice'},{id:'pl',icon:'📜',l:'Purchase List'},{id:'oo',icon:'🛒',l:'Online Orders'},
     {id:'si',icon:'💰',l:'Sales Invoice'},{id:'sl',icon:'📈',l:'Sales List'},
+    {id:'cust',icon:'👥',l:'Customers'},{id:'comp',icon:'🏆',l:'Competitions'},
   ];
   return(
     <div>
@@ -2095,6 +2645,8 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
+          {tab==='cust'&&<CustTab/>}
+          {tab==='comp'&&<CompTab/>}
          </TabErrorBoundary>
         </div>
       </div>
