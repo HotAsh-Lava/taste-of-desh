@@ -238,6 +238,40 @@ export function FSel({label,value,onChange,options=[]}) {
   );
 }
 
+// 11-digit mainland mobile number, e.g. 138xxxxxxxx.
+export function isValidMobile(mob){ return /^1\d{10}$/.test(String(mob||'').trim()); }
+// Builds the single address line stored on the order / shown to admin, so the
+// full picked region + free-text detail still cross-checks cleanly.
+export function composeAddress({province,city,detail}){
+  return `${province||''}${city&&city!==province?city:''} ${detail||''}`.replace(/\s+/g,' ').trim();
+}
+// Structured "collect an address" form, modeled on the region-then-detail flow
+// in the reference screenshot: name, 11-digit mobile, a province→city cascade
+// (district/street go in the free-text detail line, same as the app it mirrors),
+// then the address detail itself.
+export function AddressForm({value,onChange}) {
+  const cities = CHINA_REGIONS[value.province] || [];
+  return (
+    <div>
+      <FInput label="Name" value={value.name} onChange={v=>onChange({...value,name:v})} req/>
+      <FInput label="Mobile Number (11 digits)" value={value.mob} onChange={v=>onChange({...value,mob:v.replace(/[^\d]/g,'').slice(0,11)})} req/>
+      {value.mob && !isValidMobile(value.mob) && <div style={{fontSize:11,color:G.rd,marginTop:-6,marginBottom:10}}>Mobile number must be exactly 11 digits.</div>}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+        <FSel label="Province" value={value.province} onChange={v=>onChange({...value,province:v,city:''})} options={Object.keys(CHINA_REGIONS)}/>
+        <FSel label="City" value={value.city} onChange={v=>onChange({...value,city:v})} options={cities}/>
+      </div>
+      <div style={{marginBottom:10}}>
+        <div style={{fontSize:11,color:G.tx,marginBottom:3,fontWeight:'600'}}>Detailed Address (street, building, unit, etc.)<span style={{color:G.rd}}> *</span></div>
+        <textarea value={value.detail} onChange={e=>onChange({...value,detail:e.target.value})} placeholder="e.g. 106 Sandong Ave, Building 5C, Unit 3, Room 302"
+          style={{width:'100%',padding:'8px 11px',borderRadius:8,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box',minHeight:60,resize:'vertical'}}/>
+      </div>
+    </div>
+  );
+}
+export function addressFormValid(v){
+  return !!(v.name && isValidMobile(v.mob) && v.province && v.city && v.detail && v.detail.trim());
+}
+
 export function Overlay({title,onClose,children,width=560}) {
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',zIndex:2000,display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
@@ -903,6 +937,50 @@ async function fetchProfile(userId) {
 // account actually exists, then claimed once and cleared. Stored rather than kept
 // in memory so it survives the page reloads that happen during email verification.
 const REF_KEY='tod:ref';
+// Bug fix: the cart used to live only in React state, so leaving the miniapp's
+// webview to pay in Alipay/WeChat and coming back (which can tear down and
+// recreate the page) silently emptied it. Persisting it to localStorage and
+// restoring it on load fixes that without changing how the cart is used.
+const CART_KEY='tod:cart:v1';
+function loadCart(){ try{ const raw=localStorage.getItem(CART_KEY); const v=raw?JSON.parse(raw):[]; return Array.isArray(v)?v:[]; }catch{ return []; } }
+function saveCart(cart){ try{ localStorage.setItem(CART_KEY, JSON.stringify(cart)); }catch{} }
+
+// Province -> prefecture-level cities. Two-level cascade (matches the
+// checkout flow in the reference screenshot); district/township goes in the
+// free-text detail line below it, same as Pinduoduo's own "additional info" field.
+const CHINA_REGIONS = {
+  "北京市": ["北京市"],
+  "天津市": ["天津市"],
+  "上海市": ["上海市"],
+  "重庆市": ["重庆市"],
+  "河北省": ["石家庄市","唐山市","秦皇岛市","邯郸市","邢台市","保定市","张家口市","承德市","沧州市","廊坊市","衡水市"],
+  "山西省": ["太原市","大同市","阳泉市","长治市","晋城市","朔州市","晋中市","运城市","忻州市","临汾市","吕梁市"],
+  "内蒙古自治区": ["呼和浩特市","包头市","乌海市","赤峰市","通辽市","鄂尔多斯市","呼伦贝尔市","巴彦淖尔市","乌兰察布市","兴安盟","锡林郭勒盟","阿拉善盟"],
+  "辽宁省": ["沈阳市","大连市","鞍山市","抚顺市","本溪市","丹东市","锦州市","营口市","阜新市","辽阳市","盘锦市","铁岭市","朝阳市","葫芦岛市"],
+  "吉林省": ["长春市","吉林市","四平市","辽源市","通化市","白山市","松原市","白城市","延边朝鲜族自治州"],
+  "黑龙江省": ["哈尔滨市","齐齐哈尔市","鸡西市","鹤岗市","双鸭山市","大庆市","伊春市","佳木斯市","七台河市","牡丹江市","黑河市","绥化市","大兴安岭地区"],
+  "江苏省": ["南京市","无锡市","徐州市","常州市","苏州市","南通市","连云港市","淮安市","盐城市","扬州市","镇江市","泰州市","宿迁市"],
+  "浙江省": ["杭州市","宁波市","温州市","嘉兴市","湖州市","绍兴市","金华市","衢州市","舟山市","台州市","丽水市"],
+  "安徽省": ["合肥市","芜湖市","蚌埠市","淮南市","马鞍山市","淮北市","铜陵市","安庆市","黄山市","滁州市","阜阳市","宿州市","六安市","亳州市","池州市","宣城市"],
+  "福建省": ["福州市","厦门市","莆田市","三明市","泉州市","漳州市","南平市","龙岩市","宁德市"],
+  "江西省": ["南昌市","景德镇市","萍乡市","九江市","新余市","鹰潭市","赣州市","吉安市","宜春市","抚州市","上饶市"],
+  "山东省": ["济南市","青岛市","淄博市","枣庄市","东营市","烟台市","潍坊市","济宁市","泰安市","威海市","日照市","临沂市","德州市","聊城市","滨州市","菏泽市"],
+  "河南省": ["郑州市","开封市","洛阳市","平顶山市","安阳市","鹤壁市","新乡市","焦作市","濮阳市","许昌市","漯河市","三门峡市","南阳市","商丘市","信阳市","周口市","驻马店市"],
+  "湖北省": ["武汉市","黄石市","十堰市","宜昌市","襄阳市","鄂州市","荆门市","孝感市","荆州市","黄冈市","咸宁市","随州市","恩施土家族苗族自治州"],
+  "湖南省": ["长沙市","株洲市","湘潭市","衡阳市","邵阳市","岳阳市","常德市","张家界市","益阳市","郴州市","永州市","怀化市","娄底市","湘西土家族苗族自治州"],
+  "广东省": ["广州市","韶关市","深圳市","珠海市","汕头市","佛山市","江门市","湛江市","茂名市","肇庆市","惠州市","梅州市","汕尾市","河源市","阳江市","清远市","东莞市","中山市","潮州市","揭阳市","云浮市"],
+  "广西壮族自治区": ["南宁市","柳州市","桂林市","梧州市","北海市","防城港市","钦州市","贵港市","玉林市","百色市","贺州市","河池市","来宾市","崇左市"],
+  "海南省": ["海口市","三亚市","三沙市","儋州市"],
+  "四川省": ["成都市","自贡市","攀枝花市","泸州市","德阳市","绵阳市","广元市","遂宁市","内江市","乐山市","南充市","眉山市","宜宾市","广安市","达州市","雅安市","巴中市","资阳市","阿坝藏族羌族自治州","甘孜藏族自治州","凉山彝族自治州"],
+  "贵州省": ["贵阳市","六盘水市","遵义市","安顺市","毕节市","铜仁市","黔西南布依族苗族自治州","黔东南苗族侗族自治州","黔南布依族苗族自治州"],
+  "云南省": ["昆明市","曲靖市","玉溪市","保山市","昭通市","丽江市","普洱市","临沧市","楚雄彝族自治州","红河哈尼族彝族自治州","文山壮族苗族自治州","西双版纳傣族自治州","大理白族自治州","德宏傣族景颇族自治州","怒江傈僳族自治州","迪庆藏族自治州"],
+  "西藏自治区": ["拉萨市","日喀则市","昌都市","林芝市","山南市","那曲市","阿里地区"],
+  "陕西省": ["西安市","铜川市","宝鸡市","咸阳市","渭南市","延安市","汉中市","榆林市","安康市","商洛市"],
+  "甘肃省": ["兰州市","嘉峪关市","金昌市","白银市","天水市","武威市","张掖市","平凉市","酒泉市","庆阳市","定西市","陇南市","临夏回族自治州","甘南藏族自治州"],
+  "青海省": ["西宁市","海东市","海北藏族自治州","黄南藏族自治州","海南藏族自治州","果洛藏族自治州","玉树藏族自治州","海西蒙古族藏族自治州"],
+  "宁夏回族自治区": ["银川市","石嘴山市","吴忠市","固原市","中卫市"],
+  "新疆维吾尔自治区": ["乌鲁木齐市","克拉玛依市","吐鲁番市","哈密市","昌吉回族自治州","博尔塔拉蒙古自治州","巴音郭楞蒙古自治州","阿克苏地区","克孜勒苏柯尔克孜自治州","喀什地区","和田地区","伊犁哈萨克自治州","塔城地区","阿勒泰地区"],
+};
 function captureRefFromUrl(){
   try{
     const p=new URLSearchParams(window.location.search);
@@ -1287,34 +1365,35 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   const [openOrd,setOpenOrd]=useState(null);
   const [rw,setRw]=useState(null);      // points/tier/referral summary
   const [qrUrl,setQrUrl]=useState('');  // generated referral QR image
-  const [na,setNa] = useState({name:'',mob:'',addr:''});
+  const [na,setNa] = useState({name:'',mob:'',province:'',city:'',detail:''});
   const stC = {pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd},completed:{bg:G.gl,c:G.gd}};
   const [addrBusy,setAddrBusy]=useState(false);
   // Addresses now persist in the `addresses` table. They used to live only in
   // React state, so every customer re-typed their address on every single order.
   async function addAddr(){
-    if(!na.name||!na.mob||!na.addr) return;
+    if(!addressFormValid(na)) return;
     if(!auth.user?.id){ alert('Please log in first.'); return; }
     setAddrBusy(true);
     try{
+      const composed = composeAddress(na);
       if(na.id){
         const { error } = await supabase.from('addresses')
-          .update({ name: na.name, mobile: na.mob, address: na.addr })
+          .update({ name: na.name, mobile: na.mob, province: na.province, city: na.city, detail: na.detail, address: composed })
           .eq('id', na.id);
         if(error){ alert('Failed to update address: '+error.message); return; }
-        setAddrs(p=>p.map(a=>a.id===na.id?{...na}:a));
+        setAddrs(p=>p.map(a=>a.id===na.id?{...na,addr:composed}:a));
       } else {
         const { data, error } = await supabase.from('addresses')
-          .insert({ customer_id: auth.user.id, name: na.name, mobile: na.mob, address: na.addr })
+          .insert({ customer_id: auth.user.id, name: na.name, mobile: na.mob, province: na.province, city: na.city, detail: na.detail, address: composed })
           .select().single();
         if(error){ alert('Failed to save address: '+error.message); return; }
-        setAddrs(p=>[...p,{ id:data.id, name:data.name, mob:data.mobile, addr:data.address }]);
+        setAddrs(p=>[...p,{ id:data.id, name:data.name, mob:data.mobile, province:data.province, city:data.city, detail:data.detail, addr:data.address }]);
       }
-      setNa({name:'',mob:'',addr:''});
+      setNa({name:'',mob:'',province:'',city:'',detail:''});
       setSec('addrs');
     } finally { setAddrBusy(false); }
   }
-  function editAddr(a){ setNa(a); setSec('addAddr'); }
+  function editAddr(a){ setNa({id:a.id,name:a.name,mob:a.mob,province:a.province||'',city:a.city||'',detail:a.detail||''}); setSec('addAddr'); }
   async function deleteAddr(id){
     if(!window.confirm('Delete this address?')) return;
     const { error } = await supabase.from('addresses').delete().eq('id', id);
@@ -1473,7 +1552,7 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
         <div>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
             <div style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer'}} onClick={()=>setSec('main')}><span style={{fontSize:20}}>‹</span><span style={{fontWeight:'bold',fontSize:15}}>{t('savedAddresses')}</span></div>
-            <Btn sm onClick={()=>setSec('addAddr')}>+ Add</Btn>
+            <Btn sm onClick={()=>{setNa({name:'',mob:'',province:'',city:'',detail:''});setSec('addAddr');}}>+ Add</Btn>
           </div>
           {addrs.length===0
             ? <div style={{textAlign:'center',color:G.mut,padding:40}}>No saved addresses yet</div>
@@ -1497,17 +1576,12 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
       )}
       {sec==='addAddr'&&(
         <div>
-          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,cursor:'pointer'}} onClick={()=>{setNa({name:'',mob:'',addr:''});setSec('addrs');}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:14,cursor:'pointer'}} onClick={()=>{setNa({name:'',mob:'',province:'',city:'',detail:''});setSec('addrs');}}>
             <span style={{fontSize:20}}>‹</span>
             <span style={{fontWeight:'bold',fontSize:15}}>{na.id?'Edit Address':t('addAddress')}</span>
           </div>
-          <FInput label={t('name')} value={na.name} onChange={v=>setNa(p=>({...p,name:v}))} req/>
-          <FInput label={t('mobileNumber')} value={na.mob} onChange={v=>setNa(p=>({...p,mob:v}))} req/>
-          <div style={{marginBottom:10}}>
-            <div style={{fontSize:11,color:G.tx,marginBottom:3,fontWeight:'600'}}>{t('address')}<span style={{color:G.rd}}> *</span></div>
-            <textarea value={na.addr} onChange={e=>setNa(p=>({...p,addr:e.target.value}))} style={{width:'100%',padding:'8px 11px',borderRadius:8,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box',minHeight:70,resize:'vertical'}}/>
-          </div>
-          <Btn onClick={addAddr} disabled={addrBusy} style={{width:'100%',justifyContent:'center'}}>{addrBusy?'Saving…':(na.id?'Save Changes':t('saveAddress'))}</Btn>
+          <AddressForm value={na} onChange={setNa}/>
+          <Btn onClick={addAddr} disabled={addrBusy||!addressFormValid(na)} style={{width:'100%',justifyContent:'center'}}>{addrBusy?'Saving…':(na.id?'Save Changes':t('saveAddress'))}</Btn>
         </div>
       )}
       {sec==='lang'&&(
@@ -1606,14 +1680,40 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   );
 }
 
-function Checkout({step,setStep,info,setInfo,addrs,cart,rawTotal,discTotal,hasDsc,courierFee,grandTotal,totalGW,placeOrder,t,qrCodes,placing}) {
+function Checkout({step,setStep,info,setInfo,addrs,setAddrs,auth,cart,rawTotal,discTotal,hasDsc,courierFee,grandTotal,totalGW,placeOrder,t,qrCodes,placing}) {
   const [method,setMethod] = useState('alipay');
   const [proofFile,setProofFile] = useState(null);   // the real File object
   const [proofPreview,setProofPreview] = useState('');
   const [selAddr,setSelAddr] = useState(null);
+  // Bug fix: checkout used to let a customer free-type name/phone/address
+  // every time, which is how mis-typed and mixed English/Chinese addresses
+  // slipped through. Now checkout only ever picks from saved addresses;
+  // adding a brand-new one goes through the same structured form as the
+  // Profile "Saved Addresses" screen, so every address is entered once, the
+  // same way, and can be reused on future orders.
+  const [addingNew,setAddingNew] = useState(false);
+  const [na,setNa] = useState({name:'',mob:'',province:'',city:'',detail:''});
+  const [savingAddr,setSavingAddr] = useState(false);
   const fileRef = useRef(null);
   const cameraRef = useRef(null);
   function selectAddr(a){setSelAddr(a.id);setInfo({name:a.name,mob:a.mob,addr:a.addr});}
+  async function saveNewAddr(){
+    if(!addressFormValid(na)) return;
+    if(!auth?.user?.id){ alert('Please log in first.'); return; }
+    setSavingAddr(true);
+    try{
+      const composed = composeAddress(na);
+      const { data, error } = await supabase.from('addresses')
+        .insert({ customer_id: auth.user.id, name: na.name, mobile: na.mob, province: na.province, city: na.city, detail: na.detail, address: composed })
+        .select().single();
+      if(error){ alert('Failed to save address: '+error.message); return; }
+      const saved = { id:data.id, name:data.name, mob:data.mobile, addr:data.address, province:data.province, city:data.city, detail:data.detail };
+      setAddrs(p=>[...p,saved]);
+      selectAddr(saved);
+      setNa({name:'',mob:'',province:'',city:'',detail:''});
+      setAddingNew(false);
+    } finally { setSavingAddr(false); }
+  }
 
   // Fix 4: a real file picker. Validates type + size, shows a preview,
   // and hands the actual File up to placeOrder() so it can be uploaded.
@@ -1636,24 +1736,30 @@ function Checkout({step,setStep,info,setInfo,addrs,cart,rawTotal,discTotal,hasDs
         </div>
         {step==='info'&&(
           <div>
-            {addrs.length>0&&(
+            {!addingNew?(
               <div style={{marginBottom:18}}>
                 <div style={{fontWeight:'bold',fontSize:13,marginBottom:8,color:G.tx}}>📍 {t('savedAddresses')}</div>
-                {addrs.map(a=>(
-                  <div key={a.id} onClick={()=>selectAddr(a)} style={{padding:11,borderRadius:10,border:`2px solid ${selAddr===a.id?G.gd:G.brd}`,marginBottom:7,cursor:'pointer',background:selAddr===a.id?G.gl:G.w}}>
-                    <div style={{fontWeight:'bold',fontSize:12,color:selAddr===a.id?G.gd:G.dk}}>{a.name}</div>
-                    <div style={{fontSize:11,color:G.tx}}>📱 {a.mob} · 📍 {a.addr}</div>
-                  </div>
-                ))}
-                <div style={{fontSize:11,color:G.mut,marginBottom:8,marginTop:4}}>{t('orAddManually')}</div>
+                {addrs.length===0
+                  ? <div style={{fontSize:12,color:G.mut,marginBottom:10}}>No saved addresses yet — add one below to continue.</div>
+                  : addrs.map(a=>(
+                    <div key={a.id} onClick={()=>selectAddr(a)} style={{padding:11,borderRadius:10,border:`2px solid ${selAddr===a.id?G.gd:G.brd}`,marginBottom:7,cursor:'pointer',background:selAddr===a.id?G.gl:G.w}}>
+                      <div style={{fontWeight:'bold',fontSize:12,color:selAddr===a.id?G.gd:G.dk}}>{a.name}</div>
+                      <div style={{fontSize:11,color:G.tx}}>📱 {a.mob} · 📍 {a.addr}</div>
+                    </div>
+                  ))
+                }
+                <button onClick={()=>setAddingNew(true)} style={{width:'100%',padding:10,borderRadius:10,border:`1px dashed ${G.brd}`,background:'none',cursor:'pointer',fontSize:12,fontWeight:'bold',color:G.gd,marginTop:6}}>+ Add new address</button>
+              </div>
+            ):(
+              <div style={{marginBottom:10}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+                  <div style={{fontWeight:'bold',fontSize:13,color:G.tx}}>New Address</div>
+                  {addrs.length>0&&<span onClick={()=>setAddingNew(false)} style={{fontSize:12,color:G.mut,cursor:'pointer'}}>Cancel</span>}
+                </div>
+                <AddressForm value={na} onChange={setNa}/>
+                <Btn onClick={saveNewAddr} disabled={savingAddr||!addressFormValid(na)} style={{width:'100%',justifyContent:'center',marginBottom:8}}>{savingAddr?'Saving…':t('saveAddress')}</Btn>
               </div>
             )}
-            <FInput label={t('fullName')} value={info.name} onChange={v=>setInfo(p=>({...p,name:v}))} req/>
-            <FInput label={t('mobileNumber')} value={info.mob} onChange={v=>setInfo(p=>({...p,mob:v}))} req/>
-            <div style={{marginBottom:14}}>
-              <div style={{fontSize:11,color:G.tx,marginBottom:3,fontWeight:'600'}}>{t('deliveryAddress')}<span style={{color:G.rd}}> *</span></div>
-              <textarea value={info.addr} onChange={e=>setInfo(p=>({...p,addr:e.target.value}))} style={{width:'100%',padding:'8px 11px',borderRadius:8,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box',minHeight:70,resize:'vertical'}}/>
-            </div>
             <div style={{background:G.bg,borderRadius:10,padding:12,marginBottom:16,fontSize:13}}>
               <div style={{fontWeight:'bold',marginBottom:8}}>{t('orderSummary')}</div>
               {cart.map(i=><div key={i.id} style={{display:'flex',justifyContent:'space-between',marginBottom:3,fontSize:12}}><span>{i.name} ×{i.qty}</span><span>¥{(ep(i)*i.qty).toFixed(2)}</span></div>)}
@@ -1774,7 +1880,7 @@ function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrder
       const { data, error } = await supabase.from('addresses')
         .select('*').eq('customer_id', auth.user.id).order('id');
       if(error){ console.error('loadAddresses error:', error.message); return; }
-      setAddrs((data||[]).map(r=>({ id:r.id, name:r.name, mob:r.mobile, addr:r.address })));
+      setAddrs((data||[]).map(r=>({ id:r.id, name:r.name, mob:r.mobile, addr:r.address, province:r.province||'', city:r.city||'', detail:r.detail||'' })));
     }
     loadAddrs();
   },[auth.loggedIn, auth.user?.id]);
@@ -1886,7 +1992,7 @@ function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrder
           </button>
         ))}
       </div>
-      {coStep&&<Checkout step={coStep} setStep={setCO} info={info} setInfo={setInfo} addrs={addrs} cart={cart} rawTotal={rawTotal} discTotal={discTotal} hasDsc={hasDsc} courierFee={courierFee} grandTotal={grandTotal} totalGW={totalGW} placeOrder={placeOrder} t={t} qrCodes={qrCodes} placing={placing}/>}
+      {coStep&&<Checkout step={coStep} setStep={setCO} info={info} setInfo={setInfo} addrs={addrs} setAddrs={setAddrs} auth={auth} cart={cart} rawTotal={rawTotal} discTotal={discTotal} hasDsc={hasDsc} courierFee={courierFee} grandTotal={grandTotal} totalGW={totalGW} placeOrder={placeOrder} t={t} qrCodes={qrCodes} placing={placing}/>}
     </div>
   );
 }
@@ -1950,7 +2056,8 @@ export default function App() {
   const [orders,setOrders]=useState([]);
   const [sales,setSales]=useState([]);
   const [pos,setPOs]=useState([]);
-  const [cart,setCart]=useState([]);
+  const [cart,setCart]=useState(loadCart);
+  useEffect(()=>{ saveCart(cart); },[cart]);
   const [customSlides,setCustomSlides]=useState([]);
   const [qrCodes,setQrCodes]=useState({alipay:'',wechat:''});
   // Stock guard: a customer can never put more of a product in the cart than
