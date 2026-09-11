@@ -1177,7 +1177,7 @@ function PITab({prods,pos,setPOs,catColors}) {
   );
 }
 
-function PLTab({pos,setPOs,inv,setInv,catColors}) {
+function PLTab({pos,setPOs,inv,setInv,prods,catColors}) {
   const [sel,setSel]=useState([]);
   async function moveToInv(){
     const toMv=[];
@@ -1187,7 +1187,13 @@ function PLTab({pos,setPOs,inv,setInv,catColors}) {
     }));
     if(!toMv.length){setSel([]);return;}
     const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||''}));
-    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d,null))).select();
+    // Bug fix: this used to insert every batch with product_id:null, which left
+    // the batch invisible to the Online Orders batch picker (it matches by
+    // product id once an order item has one — see batchesFor below) even
+    // though the storefront's stock count still looked right (the stock
+    // trigger has its own by-name fallback). Link each batch to its real
+    // product here, the same way the manual "Add Inventory" screen already does.
+    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d, findProductForBatch(prods,d)?.id||null))).select();
     if(error){alert('Failed to move to inventory: '+error.message);return;}
     const news=data.map(fromDbInv);
     setInv(p=>[...p,...news]);
@@ -1257,6 +1263,54 @@ function PLTab({pos,setPOs,inv,setInv,catColors}) {
   );
 }
 
+// Fix: builds the plain-text order summary for the 📋 Copy button — same shape
+// admin already pastes into chat manually (name/mobile/address, then items,
+// then the price breakdown), so it can now be copied in one click.
+function orderCopyText(o,prods){
+  const charged=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+  const setSub=o.items.reduce((s,i)=>{const p=(prods||[]).find(x=>x.id===i.pid);const sp=(p&&p.sp>=i.up)?p.sp:i.up;return s+sp*i.qty;},0);
+  const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
+  const cour=o.custCourier!=null?o.custCourier:cf(tgw);
+  const disc=o.discTotal!=null?o.discTotal:charged;
+  const grand=disc+cour;
+  const showDisc=setSub>disc+0.005;
+  const lines=[];
+  lines.push(o.cname||'');
+  lines.push(o.mob||'');
+  lines.push(o.addr||'');
+  lines.push('------------------------------');
+  o.items.forEach(it=>{
+    const p=(prods||[]).find(x=>x.id===it.pid);
+    const sp=(p&&p.sp>=it.up)?p.sp:it.up;
+    lines.push(`${it.name} ×${it.qty}: ¥${(sp*it.qty).toFixed(2)}`);
+  });
+  lines.push('------------------------------');
+  if(showDisc){
+    lines.push(`Subtotal: ¥${setSub.toFixed(2)}`);
+    lines.push(`Price After Discount: ¥${disc.toFixed(2)}`);
+  } else {
+    lines.push(`Subtotal: ¥${setSub.toFixed(2)}`);
+  }
+  lines.push(`Courier (${tgw.toFixed(2)} kg): ¥${cour.toFixed(2)}`);
+  lines.push('------------------------------');
+  lines.push(`Grand Total: ¥${grand.toFixed(2)}`);
+  return lines.join('\n');
+}
+async function copyOrderText(o,prods){
+  const txt=orderCopyText(o,prods);
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){ await navigator.clipboard.writeText(txt); }
+    else throw new Error('no clipboard API');
+  } catch {
+    // Fallback for browsers/webviews without the async Clipboard API.
+    const ta=document.createElement('textarea');
+    ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    try{ document.execCommand('copy'); } catch{}
+    document.body.removeChild(ta);
+  }
+  alert('Order info copied!');
+}
 function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadInventory,reloadOrders}) {
   const [conf,setConf]=useState(null);
   const [completing,setCompleting]=useState(null);   // { order, alloc:{ itemId:{ batchId:qty } } }
@@ -1316,8 +1370,12 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
   }
 
   // Physical batches available for an order line, soonest expiry first.
+  // Falls back to a name match when a batch has no product_id (e.g. older
+  // batches moved in before Purchase List linked them) — same fallback the
+  // database's own stock trigger uses, so a batch that's counted in stock is
+  // never invisible here.
   const batchesFor=(item)=>(inv||[])
-    .filter(b=> (item.pid!=null ? b.pid===item.pid : b.name===item.name) && b.qty>0)
+    .filter(b=> (item.pid!=null ? (b.pid===item.pid || (b.pid==null && b.name===item.name)) : b.name===item.name) && b.qty>0)
     .sort((a,b)=> String(a.exp||'9999-12-31').localeCompare(String(b.exp||'9999-12-31')) || a.id-b.id);
   // Default allocation: fill soonest-expiry batches first, up to the ordered qty.
   const fifoAlloc=(item)=>{ let need=item.qty; const m={}; for(const b of batchesFor(item)){ if(need<=0) break; const t=Math.min(b.qty,need); m[b.id]=t; need-=t; } return m; };
@@ -1532,7 +1590,10 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
           <Card key={o.id} style={{marginBottom:16}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12}}>
               <div><div style={{fontWeight:'bold',fontSize:15,color:G.gd}}>{o.id}</div><div style={{fontSize:11,color:G.mut}}>{o.date} {o.time}</div></div>
-              <span style={{background:sc.bg,color:sc.c,borderRadius:10,padding:'3px 10px',fontSize:11,fontWeight:'bold'}}>{o.status}</span>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <button onClick={()=>copyOrderText(o,prods)} title="Copy order info to paste elsewhere" style={{background:G.bg,border:`1px solid ${G.brd}`,borderRadius:7,padding:'4px 9px',fontSize:11,cursor:'pointer',color:G.tx,fontWeight:'bold'}}>📋 Copy</button>
+                <span style={{background:sc.bg,color:sc.c,borderRadius:10,padding:'3px 10px',fontSize:11,fontWeight:'bold'}}>{o.status}</span>
+              </div>
             </div>
             <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:10}}>
               <div><div style={{fontSize:10,color:G.mut,marginBottom:3}}>CUSTOMER</div><input value={o.cname} onChange={e=>upd(o.id,'cname',e.target.value)} onBlur={()=>syncOrder(o)} style={{width:'100%',padding:'4px 7px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/></div>
@@ -2641,7 +2702,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           {tab==='prods'&&<ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/>}
           {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/>}
           {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
-          {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} catColors={catColors}/>}
+          {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} prods={prods} catColors={catColors}/>}
           {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
           {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/>}
           {tab==='sl'&&<SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
