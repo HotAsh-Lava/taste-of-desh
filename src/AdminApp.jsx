@@ -2671,6 +2671,8 @@ function SLTab({sales,setSales,prods,reloadProducts,reloadInventory,reloadOrders
 
 function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout,reloadProducts,reloadInventory,reloadOrders}) {
   const [tab,setTab]=useState('dash');
+  const [visitedTabs,setVisitedTabs]=useState(()=>new Set(['dash']));
+  useEffect(()=>{ setVisitedTabs(p=> p.has(tab)?p:new Set(p).add(tab)); },[tab]);
   const [open,setOpen]=useState(true);
   const tabs=[
     {id:'dash',icon:'📊',l:'Dashboard'},{id:'prods',icon:'📋',l:'Product List'},{id:'inv',icon:'🏭',l:'Inventory'},
@@ -2697,19 +2699,23 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           ))}
         </div>
         <div style={{flex:1,padding:20,minWidth:0,overflowX:'auto'}}>
-         <TabErrorBoundary key={tab}>
-          {tab==='dash'&&<DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes}/>}
-          {tab==='prods'&&<ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/>}
-          {tab==='inv'&&<InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/>}
-          {tab==='pi'&&<PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/>}
-          {tab==='pl'&&<PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} prods={prods} catColors={catColors}/>}
-          {tab==='oo'&&<OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
-          {tab==='si'&&<SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/>}
-          {tab==='sl'&&<SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/>}
-          {tab==='cust'&&<CustTab/>}
-          {tab==='comp'&&<CompTab/>}
-         </TabErrorBoundary>
+         {/* Bug fix: tabs used to be mounted only while active (tab==='x'&&<Tab/>),
+             so switching away and back threw out any in-progress typing (e.g.
+             a Sales Invoice being built). Each tab is now mounted once, the
+             first time it's opened, and just hidden (not unmounted) after
+             that, so its state survives switching away and back. */}
+         {visitedTabs.has('dash')&&<div style={{display:tab==='dash'?'block':'none'}}><TabErrorBoundary key="dash"><DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes}/></TabErrorBoundary></div>}
+         {visitedTabs.has('prods')&&<div style={{display:tab==='prods'?'block':'none'}}><TabErrorBoundary key="prods"><ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/></TabErrorBoundary></div>}
+         {visitedTabs.has('inv')&&<div style={{display:tab==='inv'?'block':'none'}}><TabErrorBoundary key="inv"><InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/></TabErrorBoundary></div>}
+         {visitedTabs.has('pi')&&<div style={{display:tab==='pi'?'block':'none'}}><TabErrorBoundary key="pi"><PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/></TabErrorBoundary></div>}
+         {visitedTabs.has('pl')&&<div style={{display:tab==='pl'?'block':'none'}}><TabErrorBoundary key="pl"><PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} prods={prods} catColors={catColors}/></TabErrorBoundary></div>}
+         {visitedTabs.has('oo')&&<div style={{display:tab==='oo'?'block':'none'}}><TabErrorBoundary key="oo"><OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/></TabErrorBoundary></div>}
+         {visitedTabs.has('si')&&<div style={{display:tab==='si'?'block':'none'}}><TabErrorBoundary key="si"><SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/></TabErrorBoundary></div>}
+         {visitedTabs.has('sl')&&<div style={{display:tab==='sl'?'block':'none'}}><TabErrorBoundary key="sl"><SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/></TabErrorBoundary></div>}
+         {visitedTabs.has('cust')&&<div style={{display:tab==='cust'?'block':'none'}}><TabErrorBoundary key="cust"><CustTab/></TabErrorBoundary></div>}
+         {visitedTabs.has('comp')&&<div style={{display:tab==='comp'?'block':'none'}}><TabErrorBoundary key="comp"><CompTab/></TabErrorBoundary></div>}
         </div>
+
       </div>
     </div>
   );
