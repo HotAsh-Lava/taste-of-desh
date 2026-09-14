@@ -1,5 +1,14 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { supabase } from './supabaseClient';
+
+// Bug fix: a page reload always dropped back to the Dashboard tab, even if
+// you were mid-way through, say, Online Orders. Remember the last open tab.
+const ADMIN_TAB_KEY = 'tod:admin:tab';
+const ADMIN_TAB_IDS = ['dash','prods','inv','pi','pl','oo','si','sl','cust','comp'];
+function loadAdminTab(){
+  try{ const v=localStorage.getItem(ADMIN_TAB_KEY); return ADMIN_TAB_IDS.includes(v)?v:'dash'; }catch{ return 'dash'; }
+}
+function saveAdminTab(tab){ try{ localStorage.setItem(ADMIN_TAB_KEY, tab); }catch{} }
 import {
   G,
   ICONS,
@@ -2670,8 +2679,9 @@ function SLTab({sales,setSales,prods,reloadProducts,reloadInventory,reloadOrders
 }
 
 function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv,delInv,setDelInv,orders,setOrders,sales,setSales,pos,setPOs,customSlides,setCustomSlides,goCustomer,qrCodes,setQrCodes,onLogout,reloadProducts,reloadInventory,reloadOrders}) {
-  const [tab,setTab]=useState('dash');
-  const [visitedTabs,setVisitedTabs]=useState(()=>new Set(['dash']));
+  const [tab,setTab]=useState(loadAdminTab);
+  useEffect(()=>{ saveAdminTab(tab); },[tab]);
+  const [visitedTabs,setVisitedTabs]=useState(()=>new Set([loadAdminTab()]));
   useEffect(()=>{ setVisitedTabs(p=> p.has(tab)?p:new Set(p).add(tab)); },[tab]);
   const [open,setOpen]=useState(true);
   const tabs=[
