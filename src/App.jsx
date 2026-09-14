@@ -2087,6 +2087,10 @@ export default function App() {
   }
   // If stock drops while a cart is open (admin edit, someone else buys the last one),
   // silently trim the cart down rather than letting checkout fail later.
+  // Also resyncs pricing (sp/offer/disc) with the live product on every reload —
+  // addToCart snapshots the product into the cart item, so without this, an
+  // offer the admin later removes stayed frozen at its old discounted price
+  // for anyone who'd already added it to their cart.
   useEffect(()=>{
     if(prods.length===0 || cart.length===0) return;
     setCart(prev=>{
@@ -2094,7 +2098,12 @@ export default function App() {
       const next=prev.map(i=>{
         const prod=prods.find(x=>x.id===i.id);
         const max=prod?prod.avail:0;
-        if(i.qty>max){ changed=true; return {...i,qty:max,avail:max}; }
+        if(!prod){ if(i.qty>max){changed=true; return {...i,qty:max};} return i; }
+        const qty = i.qty>max ? max : i.qty;
+        if(qty!==i.qty || prod.sp!==i.sp || prod.offer!==i.offer || prod.disc!==i.disc){
+          changed=true;
+          return {...i,qty,avail:max,sp:prod.sp,offer:prod.offer,disc:prod.disc};
+        }
         return i;
       }).filter(i=>i.qty>0);
       return changed || next.length!==prev.length ? next : prev;
