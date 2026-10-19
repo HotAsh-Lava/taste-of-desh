@@ -50,7 +50,7 @@ import {
   optimizeImage
 } from './App.jsx';
 
-function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,qrCodes,setQrCodes}) {
+function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,qrCodes,setQrCodes,goTab}) {
   // Load the charting library only when this tab actually renders. Vite splits
   // this into its own chunk, so it never touches the customer-facing bundle.
   const [RC,setRC]=useState(null);
@@ -67,7 +67,9 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
     return Object.entries(m).sort((a,b)=>a[0].localeCompare(b[0]));
   },[prods]);
   const totalRev=sales.reduce((s,o)=>s+o.grand,0);
-  const pendingN=orders.filter(o=>o.status==='pending').length;
+  // Orders still waiting to be completed (pending, processing or shipped) — the
+  // same number as the badge on the Online Orders tab.
+  const pendingN=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled').length;
   const [capt,setCapt]=useState('');
   const [upBusy,setUpBusy]=useState('');
   // Slideshow images and QR codes go to Storage too — site_settings used to hold
@@ -164,6 +166,15 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
   return(
     <div>
       <div style={{fontSize:19,fontWeight:'bold',color:G.dk,marginBottom:16}}>📊 Dashboard</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:12,marginBottom:18}}>
+        <Stat icon="💰" label="Total Revenue (¥)" value={`¥${Math.round(totalRev)}`} color={G.gd}/>
+        <div onClick={()=>goTab&&goTab('oo')} title="Open Online Orders" style={{cursor:goTab?'pointer':'default',position:'relative'}}>
+          <Stat icon="🛒" label={pendingN>0?'Pending Orders — tap to open':'Pending Orders'} value={pendingN} color={pendingN>0?G.rd:G.yd}/>
+          {pendingN>0&&<span style={{position:'absolute',top:8,right:10,width:10,height:10,borderRadius:'50%',background:G.rd,boxShadow:'0 0 0 3px rgba(183,28,28,0.18)'}}/>}
+        </div>
+        <Stat icon="📦" label="Products" value={prods.length} color={G.bd}/>
+        <Stat icon="⚠️" label="Low Stock Items" value={lowStock.length} color={G.rd}/>
+      </div>
       {(lowStock.length>0||expired.length>0||expiring.length>0)&&(
         <Card style={{marginBottom:18,border:`1px solid ${G.gold}`,background:'#FFFDF5'}}>
           <div style={{fontWeight:'bold',color:G.yd,marginBottom:12,fontSize:15}}>⚠️ Alerts</div>
@@ -258,12 +269,6 @@ function DashTab({prods,inv,orders,sales,catColors,customSlides,setCustomSlides,
           ))}
         </div>
       </Card>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:12,marginBottom:20}}>
-        <Stat icon="💰" label="Total Revenue (¥)" value={`¥${Math.round(totalRev)}`} color={G.gd}/>
-        <Stat icon="🛒" label="Pending Orders" value={pendingN} color={G.yd}/>
-        <Stat icon="📦" label="Products" value={prods.length} color={G.bd}/>
-        <Stat icon="⚠️" label="Low Stock Items" value={lowStock.length} color={G.rd}/>
-      </div>
       <Card style={{marginBottom:18}}>
         <div style={{fontWeight:'bold',fontSize:14,marginBottom:4,color:G.dk}}>📈 Monthly Performance (RMB)</div>
         <div style={{fontSize:11,color:G.mut,marginBottom:12}}>Last 6 months, from your Sales List. Cost is calculated from each product's cost price.</div>
@@ -944,7 +949,18 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv,reloa
               <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>{i+1}</td>
               <td style={{padding:'7px'}}>{item.date}</td>
               <td style={{padding:'7px',fontSize:10,color:G.mut}}>{item.ts}</td>
-              <td style={{padding:'7px',fontWeight:'bold'}}>{item.name}</td>
+              <td style={{padding:'7px',fontWeight:'bold'}}>
+                {item.name}
+                {(()=>{
+                  // Make a batch that isn't counted toward the right pack size
+                  // visible, instead of silently skewing stock. Fix it by editing
+                  // the batch and setting its Packed Weight to the right size.
+                  const lp=item.pid!=null?(prods||[]).find(p=>p.id===item.pid):null;
+                  if(item.pid==null) return <div title="This batch isn't linked to a product, so it isn't counted in any stock. Click ✏️ and set the correct Packed Weight to link it." style={{marginTop:3,display:'inline-block',background:'#FDECEA',color:G.rd,borderRadius:5,padding:'1px 6px',fontSize:9,fontWeight:'bold'}}>⚠ NOT LINKED — set Packed Weight</div>;
+                  if(lp&&(+lp.pw||0)!==(+item.pw||0)) return <div title={`Linked to the ${lp.pw}g product but this batch says ${item.pw}g.`} style={{marginTop:3,display:'inline-block',background:'#FFF3E0',color:'#8a6d00',borderRadius:5,padding:'1px 6px',fontSize:9,fontWeight:'bold'}}>⚠ counted as {lp.pw}g</div>;
+                  return null;
+                })()}
+              </td>
               <td style={{padding:'7px',textAlign:'center'}}><CatChip cat={item.cat} catColors={catColors}/></td>
               <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>{item.qty}</td>
               <td style={{padding:'7px',textAlign:'center',fontWeight:'bold',fontSize:11}}>{ddmmyyyy(item.exp)}</td>
@@ -1043,42 +1059,75 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv,reloa
   );
 }
 
+// Landed cost per pack, in RMB. The goods cost and per-kg shipping are converted
+// at the Costing RMB rate as before; on top of that, the BD courier (converted
+// from BDT at the same rate) and the China courier (already RMB) are pooled and
+// shared out by each line's share of the total gross weight (gross kg × qty) —
+// heavier lines carry more of the courier, exactly as the courier charged it.
+// If no line has a gross weight yet, the pool is shared by quantity instead.
+function piCosts(items,hdr){
+  const cr=+hdr.cr||0;
+  const bdcRmb=cr>0?(+hdr.bdc||0)/cr:0;
+  const cncRmb=+hdr.cnc||0;
+  const pool=bdcRmb+cncRmb;
+  const live=items.filter(i=>i.name&&(+i.qty||0)>0);
+  const totW=live.reduce((s,i)=>s+(+i.gw||0)*(+i.qty||0),0);
+  const totQ=live.reduce((s,i)=>s+(+i.qty||0),0);
+  const rows=items.map(i=>{
+    const qty=+i.qty||0, uc=+i.uc||0, us=+i.us||0, gw=+i.gw||0;
+    const tc=qty*uc, ts2=us*gw*qty;
+    const share=!(i.name&&qty>0)?0:(totW>0?(gw*qty)/totW:(totQ>0?qty/totQ:0));
+    const courPkt=qty>0?(pool*share)/qty:0;
+    const base=(qty>0&&cr>0)?(tc+ts2)/qty/cr:null;
+    return {...i,
+      tc:tc.toFixed(2), ts2:ts2.toFixed(2),
+      cour:courPkt>0?courPkt.toFixed(2):'',
+      ppc:base!=null?(base+courPkt).toFixed(2):''};
+  });
+  return {rows,pool,bdcRmb,cncRmb,totW,totQ};
+}
+
 function PITab({prods,pos,setPOs,catColors}) {
-  function blankPIItem(){return {name:'',qty:'',pw:'',uc:'',cat:'',gw:'',us:'',exp:'',sp:'',upc:'',tc:'',ts2:'',ppc:''};}
-  const [hdr,setHdr]=useState({cr:'',sr:'',bdc:'',cnc:''});
+  function blankPIItem(){return {pid:null,name:'',qty:'',pw:'',uc:'',cat:'',gw:'',us:'',exp:'',sp:'',upc:'',tc:'',ts2:'',ppc:''};}
+  const blankHdr={cr:'',sr:'',bdc:'',cnc:'',agw:''};
+  const [hdr,setHdr]=useState(blankHdr);
   const [vendor,setVendor]=useState('');
   const [items,setItems]=useState([blankPIItem()]);
   const [curId,setCurId]=useState(null);
   const poNum=curId?(pos.find(p=>p.id===curId)?.poNum||1):(pos.length>0?Math.max(...pos.map(p=>p.poNum))+1:1);
 
-  function recalc(u){
-    const qty=+(u.qty||0),uc=+(u.uc||0),us=+(u.us||0),gw=+(u.gw||0);
-    u.tc=(qty*uc).toFixed(2); u.ts2=(us*gw*qty).toFixed(2);
-    u.ppc = (qty>0 && +hdr.cr>0) ? ((+u.tc+(+u.ts2))/qty/+hdr.cr).toFixed(2) : '';
-    return u;
-  }
   function updItem(idx,f,v){
     setItems(prev=>prev.map((it,i)=>{
       if(i!==idx) return it;
-      let u={...it,[f]:v};
-      if(f==='name'&&v===''){u.pw='';u.cat='';u.gw='';u.upc='';}
-      return recalc(u);
+      const u={...it,[f]:v};
+      // Typing over the name unlinks the row from the product it was picked
+      // from; it re-links when you pick from the list again.
+      if(f==='name'){ u.pid=null; if(v===''){u.pw='';u.cat='';u.gw='';u.upc='';} }
+      return u;
     }));
   }
   function selectItem(idx,p){
     setItems(prev=>{
-      const next = prev.map((it,i)=> i!==idx ? it : recalc({...it,name:p.name,pw:p.pw,cat:p.cat,gw:p.gw,upc:p.upc||''}));
+      const next = prev.map((it,i)=> i!==idx ? it : {...it,pid:p.id,name:p.name,pw:p.pw,cat:p.cat,gw:p.gw,upc:p.upc||''});
       return idx===prev.length-1 ? [...next, blankPIItem()] : next;
     });
   }
-  const totQty=items.reduce((s,i)=>s+(+i.qty||0),0);
-  const totC=items.reduce((s,i)=>s+(+i.tc||0),0);
-  const totS=items.reduce((s,i)=>s+(+i.ts2||0),0);
+  // Every cost column is derived from the inputs on each render, so changing a
+  // courier or a rate re-spreads the courier across all lines immediately.
+  const costs=useMemo(()=>piCosts(items,hdr),[items,hdr]);
+  const rows=costs.rows;
+  const totQty=rows.reduce((s,i)=>s+(+i.qty||0),0);
+  const totC=rows.reduce((s,i)=>s+(+i.tc||0),0);
+  const totS=rows.reduce((s,i)=>s+(+i.ts2||0),0);
+  const totGW=costs.totW;
+  const agw=hdr.agw===''||hdr.agw==null?null:+hdr.agw;
+  const gwDiff=agw!=null?agw-totGW:null;
   const chnLC=(+hdr.cnc)*(+hdr.sr)||0;
   const grand=totC+totS+(+hdr.bdc||0)+chnLC;
+  const unpicked=rows.filter(i=>i.name&&!i.pid&&!(prods||[]).some(p=>p.name===i.name.trim()));
 
   async function save(){
-    const fi=items.filter(i=>i.name&&i.qty);if(!fi.length){alert('Add at least one product');return;}
+    const fi=rows.filter(i=>i.name&&i.qty);if(!fi.length){alert('Add at least one product');return;}
     const existing = curId ? pos.find(p=>p.id===curId) : null;
     const draft={poNum,date:existing?existing.date:bjDate(),time:existing?existing.time:bjTime(),vendor,hdr:{...hdr},items:fi,totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand};
     if(curId){
@@ -1093,7 +1142,7 @@ function PITab({prods,pos,setPOs,catColors}) {
     }
     alert('Purchase order saved!');
   }
-  function newOrd(){setHdr({cr:'',sr:'',bdc:'',cnc:''});setVendor('');setItems([blankPIItem()]);setCurId(null);}
+  function newOrd(){setHdr(blankHdr);setVendor('');setItems([blankPIItem()]);setCurId(null);}
   async function deleteOrder(){
     if(!curId){alert('Load or save an order first, or click Load on one below to delete it.');return;}
     const { error } = await supabase.from('purchase_orders').delete().eq('id',curId);
@@ -1104,13 +1153,14 @@ function PITab({prods,pos,setPOs,catColors}) {
     newOrd();
   }
   function printOrder(){
-    const html=buildPOHTML({poNum,date:bjDate(),time:bjTime(),vendor,hdr,items:items.filter(i=>i.name&&i.qty),totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand});
+    const html=buildPOHTML({poNum,date:bjDate(),time:bjTime(),vendor,hdr,items:rows.filter(i=>i.name&&i.qty),totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand,totGW,agw});
     openPrintWindow(html);
   }
   function loadPO(po){
-    setCurId(po.id); setVendor(po.vendor||''); setHdr(po.hdr||{cr:'',sr:'',bdc:'',cnc:''});
-    setItems([...(po.items||[]).map(it=>({...it})), blankPIItem()]);
+    setCurId(po.id); setVendor(po.vendor||''); setHdr({...blankHdr,...(po.hdr||{})});
+    setItems([...(po.items||[]).map(it=>({pid:null,...it})), blankPIItem()]);
   }
+  const box={background:G.w,borderRadius:8,padding:'8px 10px',border:`1px solid ${G.brd}`};
 
   return(
     <div>
@@ -1125,12 +1175,13 @@ function PITab({prods,pos,setPOs,catColors}) {
       </div>
       <Card style={{marginBottom:14}}>
         <div style={{fontSize:12,color:G.mut,marginBottom:10,fontWeight:'bold'}}>PO# {poNum} · Date: {bjDate()} · Time: {bjTime()}</div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(175px,1fr))',gap:10}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(165px,1fr))',gap:10}}>
           <FInput label="Vendor" value={vendor} onChange={setVendor}/>
           <FInput label="Costing RMB Rate" value={hdr.cr} onChange={v=>setHdr(p=>({...p,cr:v}))} type="number"/>
           <FInput label="Selling RMB Rate" value={hdr.sr} onChange={v=>setHdr(p=>({...p,sr:v}))} type="number"/>
           <FInput label="BD Courier (BDT)" value={hdr.bdc} onChange={v=>setHdr(p=>({...p,bdc:v}))} type="number"/>
           <FInput label="China Courier (RMB)" value={hdr.cnc} onChange={v=>setHdr(p=>({...p,cnc:v}))} type="number"/>
+          <FInput label="Actual Gross Weight (KG)" value={hdr.agw??''} onChange={v=>setHdr(p=>({...p,agw:v}))} type="number" placeholder="Weighed total"/>
         </div>
       </Card>
       <Card style={{marginBottom:14,overflowX:'auto'}}>
@@ -1140,7 +1191,7 @@ function PITab({prods,pos,setPOs,catColors}) {
               <th key={h} style={{padding:'7px 5px',textAlign:'center',whiteSpace:'nowrap'}}>{h}</th>
             ))}
           </tr></thead>
-          <tbody>{items.map((it,idx)=>(
+          <tbody>{rows.map((it,idx)=>(
             <tr key={idx} style={{background:idx%2===0?G.w:G.bg,borderBottom:`1px solid ${G.brd}`}}>
               <td style={{padding:'5px',minWidth:155}}><ComboInput value={it.name} onChange={v=>updItem(idx,'name',v)} onPick={p=>selectItem(idx,p)} options={prods} placeholder="Type to search product..."/></td>
               <td style={{padding:'5px'}}><input type="number" value={it.qty} onChange={e=>updItem(idx,'qty',e.target.value)} style={{width:50,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11,textAlign:'center'}}/></td>
@@ -1152,7 +1203,10 @@ function PITab({prods,pos,setPOs,catColors}) {
               <td style={{padding:'5px'}}><input type="number" value={it.us} onChange={e=>updItem(idx,'us',e.target.value)} style={{width:65,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
               <td style={{padding:'5px',textAlign:'center',fontWeight:'bold'}}>{it.ts2||0}</td>
               <td style={{padding:'5px'}}><input type="date" value={it.exp} onChange={e=>updItem(idx,'exp',e.target.value)} style={{padding:'3px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:10}}/></td>
-              <td style={{padding:'5px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{it.ppc?`¥${it.ppc}`:'—'}</td>
+              <td style={{padding:'5px',textAlign:'center',color:G.gd,fontWeight:'bold',whiteSpace:'nowrap'}}>
+                {it.ppc?`¥${it.ppc}`:'—'}
+                {it.ppc&&it.cour&&<div style={{fontSize:9,color:G.mut,fontWeight:'normal'}}>incl. ¥{it.cour} courier</div>}
+              </td>
               <td style={{padding:'5px'}}><input type="number" value={it.sp} onChange={e=>updItem(idx,'sp',e.target.value)} style={{width:60,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
               <td style={{padding:'5px',textAlign:'center',fontSize:10}}>{it.upc}</td>
               <td style={{padding:'5px',textAlign:'center'}}>{items.length>1&&<button onClick={()=>setItems(p=>p.filter((_,j)=>j!==idx))} style={{background:'none',border:'none',cursor:'pointer',color:'#B71C1C',fontSize:14}}>✕</button>}</td>
@@ -1160,11 +1214,27 @@ function PITab({prods,pos,setPOs,catColors}) {
           ))}</tbody>
         </table>
         <div style={{marginTop:10}}><Btn sm onClick={()=>setItems(p=>[...p,blankPIItem()])}>+ Add Row</Btn></div>
-        <div style={{background:G.bg,borderRadius:8,padding:12,marginTop:14,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(160px,1fr))',gap:8,fontSize:12}}>
-          <div><strong>Total Qty:</strong> {totQty} PCS</div><div><strong>Total Cost:</strong> ৳{totC.toFixed(2)}</div>
-          <div><strong>Total Shipping:</strong> ৳{totS.toFixed(2)}</div><div><strong>BD Courier:</strong> ৳{(+hdr.bdc||0).toFixed(2)}</div>
+        {unpicked.length>0&&(
+          <div style={{marginTop:10,background:'#FFF3E0',border:`1px solid ${G.yd}`,borderRadius:8,padding:'8px 11px',fontSize:11,color:G.tx}}>
+            ⚠️ {unpicked.map(i=>`“${i.name}”`).join(', ')} {unpicked.length===1?"doesn't":"don't"} match a product. Pick from the dropdown so the pack size, weight and stock link come through.
+          </div>
+        )}
+        <div style={{background:G.bg,borderRadius:8,padding:12,marginTop:14,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(170px,1fr))',gap:8,fontSize:12}}>
+          <div><strong>Total Qty:</strong> {totQty} PCS</div>
+          <div><strong>Total Cost:</strong> ৳{totC.toFixed(2)}</div>
+          <div><strong>Total Shipping:</strong> ৳{totS.toFixed(2)}</div>
+          <div><strong>BD Courier:</strong> ৳{(+hdr.bdc||0).toFixed(2)}</div>
           <div><strong>China Courier:</strong> ৳{chnLC.toFixed(2)}</div>
+          <div><strong>Total Gross Weight:</strong> {totGW.toFixed(3)} kg</div>
+          {agw!=null&&<div><strong>Actual Gross Weight:</strong> {agw.toFixed(3)} kg <span style={{color:Math.abs(gwDiff)<0.0005?G.gd:(gwDiff>0?G.rd:G.bd),fontWeight:'bold'}}>({gwDiff>=0?'+':''}{gwDiff.toFixed(3)} kg)</span></div>}
           <div style={{fontWeight:'bold',color:G.gd,fontSize:14}}><strong>Grand Total:</strong> ৳{grand.toFixed(2)}</div>
+        </div>
+        <div style={{...box,marginTop:10,fontSize:11,color:G.tx,lineHeight:1.6}}>
+          <b style={{color:G.gd}}>How Per Pkt (RMB) is worked out:</b> (unit cost + shipping) ÷ costing rate, plus each pack's share of the couriers.
+          {' '}Courier to share out: <b>¥{costs.pool.toFixed(2)}</b>
+          {' '}= BD ৳{(+hdr.bdc||0).toFixed(2)} ÷ {+hdr.cr||'—'} (¥{costs.bdcRmb.toFixed(2)}) + China ¥{costs.cncRmb.toFixed(2)},
+          {' '}split by each line's gross weight × qty{costs.totW>0?` (total ${costs.totW.toFixed(3)} kg)`:' (by quantity until gross weights are filled in)'}.
+          {!(+hdr.cr>0)&&<div style={{color:G.rd,fontWeight:'bold'}}>Enter the Costing RMB Rate to calculate Per Pkt.</div>}
         </div>
       </Card>
       {pos.length>0&&(
@@ -1188,21 +1258,29 @@ function PITab({prods,pos,setPOs,catColors}) {
 
 function PLTab({pos,setPOs,inv,setInv,prods,catColors}) {
   const [sel,setSel]=useState([]);
+  // Each purchase order is collapsed to one line (PO#, vendor, date) until you
+  // open it — the full tables made this tab very long.
+  const [openPO,setOpenPO]=useState(()=>new Set());
+  const togglePO=(id)=>setOpenPO(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n;});
   async function moveToInv(){
     const toMv=[];
-    pos.forEach(po=>po.items.forEach((it,ii)=>{
+    // Per-pack cost is recalculated with the current rule (courier included), so an
+    // older PO that hasn't been re-saved still lands in inventory at landed cost.
+    pos.forEach(po=>{ const costed=piCosts(po.items||[],po.hdr||{}).rows; costed.forEach((it,ii)=>{
       const key=`${po.id}_${ii}`;
       if(sel.includes(key) && !it.moved) toMv.push({...it,_poId:po.id,_idx:ii});
-    }));
+    }); });
     if(!toMv.length){setSel([]);return;}
-    const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||''}));
-    // Bug fix: this used to insert every batch with product_id:null, which left
-    // the batch invisible to the Online Orders batch picker (it matches by
-    // product id once an order item has one — see batchesFor below) even
-    // though the storefront's stock count still looked right (the stock
-    // trigger has its own by-name fallback). Link each batch to its real
-    // product here, the same way the manual "Add Inventory" screen already does.
-    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d, findProductForBatch(prods,d)?.id||null))).select();
+    const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||'',_pid:it.pid}));
+    // Link each batch to its product. A row picked from the dropdown in Purchase
+    // Invoice remembers exactly which product (and so which pack size) it was;
+    // older rows fall back to matching name + pack weight + UPC. The database
+    // also links anything left unlinked (Query-32), so nothing lands orphaned.
+    const pidFor=(d)=>{
+      if(d._pid!=null){ const p=(prods||[]).find(x=>x.id===d._pid); if(p&&p.name===d.name) return p.id; }
+      return findProductForBatch(prods,d)?.id||null;
+    };
+    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d, pidFor(d)))).select();
     if(error){alert('Failed to move to inventory: '+error.message);return;}
     const news=data.map(fromDbInv);
     setInv(p=>[...p,...news]);
@@ -1210,26 +1288,49 @@ function PLTab({pos,setPOs,inv,setInv,prods,catColors}) {
     const affectedPOs=updatedPOs.filter(po=>po.items.some((it,ii)=>sel.includes(`${po.id}_${ii}`)));
     await Promise.all(affectedPOs.map(po=>supabase.from('purchase_orders').update({items:po.items}).eq('id',po.id)));
     setPOs(updatedPOs);
-    alert(`${news.length} items moved to Inventory!`);setSel([]);
+    const unlinked=news.filter(n=>n.pid==null).map(n=>n.name);
+    alert(`${news.length} items moved to Inventory!`+(unlinked.length?`\n\n⚠️ Not linked to a product (check name / pack weight in Inventory): ${unlinked.join(', ')}`:''));
+    setSel([]);
   }
   return(
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14,flexWrap:'wrap',gap:8}}>
         <div style={{fontSize:19,fontWeight:'bold',color:G.dk}}>📜 Purchase List</div>
-        {sel.length>0&&<Btn onClick={moveToInv}>📦 Move to Inventory ({sel.length})</Btn>}
+        <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+          {pos.length>0&&<Btn v='outline' sm onClick={()=>setOpenPO(p=>p.size?new Set():new Set(pos.map(x=>x.id)))}>{openPO.size?'Collapse all':'Expand all'}</Btn>}
+          {sel.length>0&&<Btn onClick={moveToInv}>📦 Move to Inventory ({sel.length})</Btn>}
+        </div>
       </div>
       {pos.length===0?<Card><div style={{textAlign:'center',padding:40,color:G.mut}}>No purchase orders yet. Create one in Purchase Invoice.</div></Card>:
         [...pos].sort((a,b)=>b.poNum-a.poNum).map(po=>{
           const selectableKeys = po.items.map((it,i)=>!it.moved?`${po.id}_${i}`:null).filter(Boolean);
           const allSelHere = selectableKeys.length>0 && selectableKeys.every(k=>sel.includes(k));
+          const selHere = selectableKeys.filter(k=>sel.includes(k)).length;
+          const isOpen = openPO.has(po.id);
+          const waiting = selectableKeys.length;
           function toggleAllHere(){
             if(allSelHere) setSel(p=>p.filter(x=>!selectableKeys.includes(x)));
             else setSel(p=>[...new Set([...p,...selectableKeys])]);
           }
+          const totGW=(po.items||[]).reduce((s,i)=>s+(+i.gw||0)*(+i.qty||0),0);
+          const costed=piCosts(po.items||[],po.hdr||{}).rows;
           return(
-          <Card key={po.id} style={{marginBottom:18}}>
+          <Card key={po.id} style={{marginBottom:10,padding:0,overflow:'hidden'}}>
+            <div onClick={()=>togglePO(po.id)} style={{cursor:'pointer',display:'flex',alignItems:'center',gap:12,padding:'12px 16px',flexWrap:'wrap',background:isOpen?G.gl:G.w,userSelect:'none'}}>
+              <span style={{color:G.gd,fontSize:13,width:12}}>{isOpen?'▾':'▸'}</span>
+              <span style={{fontWeight:'bold',color:G.gd,fontSize:14,minWidth:62}}>PO# {po.poNum}</span>
+              <span style={{fontSize:13,color:G.dk,fontWeight:'bold',flex:'1 1 140px'}}>{po.vendor||'— no vendor —'}</span>
+              <span style={{fontSize:12,color:G.mut}}>📅 {po.date}</span>
+              <span style={{fontSize:11,color:G.tx}}>{po.items.length} item{po.items.length!==1?'s':''}</span>
+              {waiting>0
+                ? <span style={{background:G.goldl,color:'#8a6d00',borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>{waiting} not in inventory</span>
+                : <span style={{background:G.gl,color:G.gd,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>✓ all in inventory</span>}
+              {selHere>0&&<span style={{background:G.bl,color:G.bd,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>{selHere} selected</span>}
+            </div>
+            {isOpen&&(
+            <div style={{padding:'12px 16px 16px'}}>
             <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(135px,1fr))',gap:10,background:G.gl,borderRadius:9,padding:'11px 15px',marginBottom:12}}>
-              {[['PO#',po.poNum],['Vendor',po.vendor||'—'],['Grand Total(BDT)',`৳${(po.grand||0).toFixed(2)}`],['Total Cost(BDT)',`৳${(po.totC||0).toFixed(2)}`],['Total Ship(BDT)',`৳${(po.totS||0).toFixed(2)}`],['BD Local Courier(BDT)',`৳${(po.bdLC||0).toFixed(2)}`],['China Local Courier(BDT)',`৳${(po.chnLC||0).toFixed(2)}`],['Costing RMB Rate',po.hdr?.cr||'—'],['Selling RMB Rate',po.hdr?.sr||'—'],['BD Courier(BDT)',po.hdr?.bdc||'—'],['China Courier(RMB)',po.hdr?.cnc||'—']].map(([l,v])=>(
+              {[['Grand Total(BDT)',`৳${(po.grand||0).toFixed(2)}`],['Total Cost(BDT)',`৳${(po.totC||0).toFixed(2)}`],['Total Ship(BDT)',`৳${(po.totS||0).toFixed(2)}`],['BD Local Courier(BDT)',`৳${(po.bdLC||0).toFixed(2)}`],['China Local Courier(BDT)',`৳${(po.chnLC||0).toFixed(2)}`],['Costing RMB Rate',po.hdr?.cr||'—'],['Selling RMB Rate',po.hdr?.sr||'—'],['BD Courier(BDT)',po.hdr?.bdc||'—'],['China Courier(RMB)',po.hdr?.cnc||'—'],['Total Gross Wt',`${totGW.toFixed(3)} kg`],['Actual Gross Wt',po.hdr?.agw?`${(+po.hdr.agw).toFixed(3)} kg`:'—']].map(([l,v])=>(
                 <div key={l}><div style={{fontSize:10,color:G.mut,fontWeight:'bold'}}>{l}</div><div style={{fontSize:12,fontWeight:'bold',color:G.dk}}>{v}</div></div>
               ))}
             </div>
@@ -1257,13 +1358,15 @@ function PLTab({pos,setPOs,inv,setInv,prods,catColors}) {
                     <td style={{padding:'6px',textAlign:'center'}}>{it.us}</td>
                     <td style={{padding:'6px',textAlign:'center'}}>{it.ts2}</td>
                     <td style={{padding:'6px',textAlign:'center',...expStyle(it.exp)}}>{it.exp}</td>
-                    <td style={{padding:'6px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{it.ppc?`¥${it.ppc}`:'—'}</td>
+                    <td style={{padding:'6px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{costed[i]&&costed[i].ppc?`¥${costed[i].ppc}`:'—'}{costed[i]&&costed[i].cour?<div style={{fontSize:9,color:G.mut,fontWeight:'normal'}}>incl. ¥{costed[i].cour} courier</div>:null}</td>
                     <td style={{padding:'6px',textAlign:'center'}}>{it.sp?`¥${it.sp}`:'—'}</td>
                     <td style={{padding:'6px',fontSize:10,color:G.mut}}>{it.upc}</td>
                   </tr>
                 );})}</tbody>
               </table>
             </div>
+            </div>
+            )}
           </Card>
           );
         })
@@ -1327,6 +1430,10 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
   const [editing,setEditing]=useState(null);          // { orderId, items:[{pid,name,qty,up,gw,disc}] }
   const active=orders.filter(o=>o.status!=='completed'&&o.status!=='cancelled');
   const [showDone,setShowDone]=useState(false);
+  const [doneQ,setDoneQ]=useState('');
+  const [doneOpen,setDoneOpen]=useState(()=>new Set());
+  const [doneLimit,setDoneLimit]=useState(25);
+  const toggleDone=(id)=>setDoneOpen(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n;});
   const done=orders.filter(o=>o.status==='completed');
 
   // ---- Editing a pending order's items (reservations only, no inventory yet) ----
@@ -1379,13 +1486,17 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
   }
 
   // Physical batches available for an order line, soonest expiry first.
-  // Falls back to a name match when a batch has no product_id (e.g. older
-  // batches moved in before Purchase List linked them) — same fallback the
-  // database's own stock trigger uses, so a batch that's counted in stock is
-  // never invisible here.
-  const batchesFor=(item)=>(inv||[])
-    .filter(b=> (item.pid!=null ? (b.pid===item.pid || (b.pid==null && b.name===item.name)) : b.name===item.name) && b.qty>0)
-    .sort((a,b)=> String(a.exp||'9999-12-31').localeCompare(String(b.exp||'9999-12-31')) || a.id-b.id);
+  // A batch with no product link only counts when its NAME AND PACK WEIGHT both
+  // match this line's product — the same rule the database stock trigger uses
+  // (Query-32). Matching on name alone used to offer, say, a 100g Black Tea
+  // batch for a 200g Black Tea order.
+  const batchesFor=(item)=>{
+    const prod=(prods||[]).find(p=>p.id===item.pid);
+    const samePack=(b)=>!prod || (+b.pw||0)===(+prod.pw||0);
+    return (inv||[])
+      .filter(b=> (item.pid!=null ? (b.pid===item.pid || (b.pid==null && b.name===item.name && samePack(b))) : b.name===item.name) && b.qty>0)
+      .sort((a,b)=> String(a.exp||'9999-12-31').localeCompare(String(b.exp||'9999-12-31')) || a.id-b.id);
+  };
   // Default allocation: fill soonest-expiry batches first, up to the ordered qty.
   const fifoAlloc=(item)=>{ let need=item.qty; const m={}; for(const b of batchesFor(item)){ if(need<=0) break; const t=Math.min(b.qty,need); m[b.id]=t; need-=t; } return m; };
   // A previously SAVED batch pick for one order line, converted from the stored
@@ -1493,7 +1604,9 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
       p_order_id:o.id, p_date:bjDate(), p_disc_total:disc, p_courier:cour, p_alloc:alloc||null
     });
     if(error){ alert('Could not complete the order:\n\n'+error.message); return; }
-    const sl={seq:nextSeq(sales),date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,
+    // The database assigns the sale's order number — read it back rather than guess.
+    const { data:srow }=await supabase.from('sales').select('seq').eq('id',saleId).single();
+    const sl={seq:(srow&&srow.seq!=null)?srow.seq:nextSeq(sales),date:bjDate(),type:'online',oid:o.id,cname:o.cname,mob:o.mob,addr:o.addr,
       sub,disc:sub-disc,discTotal:disc,courier:cour,grand:disc+cour,id:saleId,
       items:o.items.map(i=>({name:i.name,qty:i.qty,up:i.up,tp:+(i.up*i.qty).toFixed(2)}))};
     setSales(p=>[sl,...p]);
@@ -1687,39 +1800,112 @@ function OOTab({orders,setOrders,sales,setSales,inv,prods,reloadProducts,reloadI
         );
       })}
       {done.length>0&&(
-        <div style={{marginTop:22}}>
-          <div onClick={()=>setShowDone(s=>!s)} style={{cursor:'pointer',fontWeight:'bold',fontSize:14,color:G.gd,marginBottom:8,userSelect:'none'}}>
-            {showDone?'▾':'▸'} Completed Orders ({done.length})
+        <Card style={{marginTop:22}}>
+          {/* Completed orders, laid out like "Recent Invoice Orders": one line each,
+              click a line to see everything about it — customer, mobile, address,
+              tracking, items and the price breakdown. */}
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:showDone?10:0}}>
+            <div onClick={()=>setShowDone(s=>!s)} style={{cursor:'pointer',fontWeight:'bold',fontSize:14,color:G.gd,userSelect:'none'}}>
+              {showDone?'▾':'▸'} Completed Orders ({done.length})
+            </div>
+            {showDone&&<input value={doneQ} onChange={e=>{setDoneQ(e.target.value);setDoneLimit(25);}} placeholder="Search order, customer, mobile or tracking…" style={{padding:'6px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:12,minWidth:0,flex:'0 1 280px',boxSizing:'border-box'}}/>}
           </div>
-          {showDone&&done.slice(0,20).map(o=>{
-            const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
-            const cour=o.custCourier!=null?o.custCourier:cf(o.items.reduce((s,i)=>s+i.gw*i.qty,0));
-            const grand=(o.discTotal||sub)+cour;
+          {showDone&&(()=>{
+            const lq=doneQ.trim().toLowerCase();
+            const saleFor=(o)=>(sales||[]).find(s=>s.oid===o.id);
+            const list=!lq?done:done.filter(o=>{
+              const sl=saleFor(o);
+              return [o.id,o.cname,o.mob,o.addr,...(o.tracking||[]),sl?`#${sl.seq}`:''].some(x=>(x||'').toString().toLowerCase().includes(lq));
+            });
+            const shown=list.slice(0,doneLimit);
+            const th={padding:'8px 7px',whiteSpace:'nowrap'};
             return(
-              <Card key={o.id} style={{marginBottom:10}}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
-                  <div style={{minWidth:0}}>
-                    <div style={{fontWeight:'bold',fontSize:13,color:G.gd}}>{o.id}</div>
-                    <div style={{fontSize:11,color:G.mut}}>{o.date} · {o.cname} · ¥{grand.toFixed(2)}</div>
-                    <div style={{fontSize:11,color:G.tx,marginTop:3}}>{o.items.map(i=>`${i.name}×${i.qty}`).join(', ')}</div>
+              <div>
+                <div style={{overflowX:'auto'}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,minWidth:720}}>
+                    <thead><tr style={{background:G.gl}}>
+                      <th style={th}></th><th style={th}>Order</th><th style={th}>Sale #</th><th style={th}>Date</th>
+                      <th style={th}>Customer</th><th style={th}>Mobile</th><th style={th}>Tracking</th><th style={{...th,textAlign:'right'}}>Total</th>
+                    </tr></thead>
+                    <tbody>{shown.map(o=>{
+                      const sub=o.items.reduce((s,i)=>s+i.up*i.qty,0);
+                      const tgw=o.items.reduce((s,i)=>s+i.gw*i.qty,0);
+                      const cour=o.custCourier!=null?o.custCourier:cf(tgw);
+                      const disc=o.discTotal!=null?o.discTotal:sub;
+                      const grand=disc+cour;
+                      const setSub=o.items.reduce((s,i)=>{const p=(prods||[]).find(x=>x.id===i.pid);const sp=(p&&p.sp>=i.up)?p.sp:i.up;return s+sp*i.qty;},0);
+                      const showDisc=setSub>disc+0.005;
+                      const sl=saleFor(o);
+                      const isOpen=doneOpen.has(o.id);
+                      const tr=(o.tracking||[]).filter(t=>t&&String(t).trim());
+                      return(
+                        <React.Fragment key={o.id}>
+                          <tr onClick={()=>toggleDone(o.id)} style={{borderBottom:`1px solid ${G.brd}`,cursor:'pointer',background:isOpen?'#F1F8F2':'transparent'}}>
+                            <td style={{padding:'7px',textAlign:'center',color:G.gd}}>{isOpen?'▼':'▶'}</td>
+                            <td style={{padding:'7px',fontWeight:'bold',color:G.gd,whiteSpace:'nowrap'}}>{o.id}</td>
+                            <td style={{padding:'7px',textAlign:'center',fontWeight:'bold'}}>{sl?`#${sl.seq}`:'—'}</td>
+                            <td style={{padding:'7px',textAlign:'center',whiteSpace:'nowrap'}}>{o.date}</td>
+                            <td style={{padding:'7px'}}>{o.cname||'—'}</td>
+                            <td style={{padding:'7px',textAlign:'center'}}>{o.mob||'—'}</td>
+                            <td style={{padding:'7px',textAlign:'center'}}>{tr.length?<span style={{color:G.gd,fontWeight:'bold'}}>✓ {tr.length>1?`${tr.length} nos.`:tr[0]}</span>:<span style={{color:G.rd}}>none</span>}</td>
+                            <td style={{padding:'7px',textAlign:'right',fontWeight:'bold',color:G.gd}}>¥{grand.toFixed(2)}</td>
+                          </tr>
+                          {isOpen&&(
+                            <tr><td colSpan={8} style={{background:G.gl,padding:'12px 14px'}}>
+                              <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:12,textAlign:'left'}}>
+                                <div style={{background:G.w,borderRadius:8,padding:10,border:`1px solid ${G.brd}`}}>
+                                  <div style={{fontSize:10,color:G.mut,fontWeight:'bold',marginBottom:6}}>DELIVER TO</div>
+                                  <div style={{fontSize:13,fontWeight:'bold',color:G.dk}}>{o.cname||'—'}</div>
+                                  <div style={{fontSize:12,color:G.tx,marginTop:2}}>📱 {o.mob||'—'}</div>
+                                  <div style={{fontSize:12,color:G.tx,marginTop:4,lineHeight:1.5,whiteSpace:'pre-wrap'}}>📍 {o.addr||'—'}</div>
+                                  <div style={{fontSize:11,color:G.mut,marginTop:6}}>Ordered {o.date} {o.time}{o.payMethod?` · ${o.payMethod==='alipay'?'💙 Alipay':'💚 WeChat Pay'}`:''}</div>
+                                  {o.proofUrl&&<a href={o.proofUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:G.bd,display:'inline-block',marginTop:4}}>🧾 View payment proof</a>}
+                                </div>
+                                <div style={{background:G.w,borderRadius:8,padding:10,border:`1px solid ${G.brd}`}}>
+                                  <div style={{fontSize:10,color:G.mut,fontWeight:'bold',marginBottom:6}}>ITEMS</div>
+                                  {o.items.map((it,i)=>{const p=(prods||[]).find(x=>x.id===it.pid);const sp=(p&&p.sp>=it.up)?p.sp:it.up;return(
+                                    <div key={i} style={{display:'flex',justifyContent:'space-between',fontSize:12,marginBottom:3,gap:8}}>
+                                      <span>{it.name}{p&&p.pw?<span style={{color:G.mut}}> ({p.pw}g)</span>:null} ×{it.qty}</span><span>¥{(sp*it.qty).toFixed(2)}</span>
+                                    </div>);})}
+                                  <div style={{borderTop:`1px solid ${G.brd}`,marginTop:6,paddingTop:6,fontSize:12}}>
+                                    <div style={{display:'flex',justifyContent:'space-between',color:showDisc?G.mut:G.tx,textDecoration:showDisc?'line-through':'none'}}><span>Subtotal</span><span>¥{setSub.toFixed(2)}</span></div>
+                                    {showDisc&&<div style={{display:'flex',justifyContent:'space-between',color:G.gd,fontWeight:'bold'}}><span>Price After Discount</span><span>¥{disc.toFixed(2)}</span></div>}
+                                    <div style={{display:'flex',justifyContent:'space-between'}}><span>Courier ({tgw.toFixed(2)} kg)</span><span>¥{cour.toFixed(2)}</span></div>
+                                    <div style={{display:'flex',justifyContent:'space-between',fontWeight:'bold',fontSize:13,color:G.gd,marginTop:3}}><span>Grand Total</span><span>¥{grand.toFixed(2)}</span></div>
+                                  </div>
+                                </div>
+                                <div style={{background:G.w,borderRadius:8,padding:10,border:`1px solid ${G.brd}`}}>
+                                  <div style={{fontSize:10,fontWeight:'bold',color:hasTracking(o)?G.gd:G.mut,marginBottom:6}}>📦 TRACKING{hasTracking(o)?'':' — none added yet'}</div>
+                                  {(o.tracking||[]).map((tk,i)=>(
+                                    <div key={i} style={{display:'flex',gap:6,marginBottom:6}}>
+                                      <input value={tk} onChange={e=>{const t2=[...o.tracking];t2[i]=e.target.value;upd(o.id,'tracking',t2);}} onBlur={()=>syncOrder(o)} placeholder="e.g. SF1234567890" style={{flex:1,minWidth:0,padding:'5px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12,boxSizing:'border-box'}}/>
+                                      <button onClick={()=>{const nt=o.tracking.filter((_,j)=>j!==i);upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>
+                                    </div>
+                                  ))}
+                                  <Btn sm v='info' onClick={()=>{const nt=[...(o.tracking||[]),''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
+                                  <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:10}}>
+                                    <button onClick={()=>copyOrderText(o,prods)} style={{background:G.bg,border:`1px solid ${G.brd}`,borderRadius:7,padding:'5px 10px',fontSize:11,cursor:'pointer',color:G.tx,fontWeight:'bold'}}>📋 Copy order info</button>
+                                    <Btn v='info' sm onClick={()=>openEdit(o)}>✏️ Edit Items</Btn>
+                                  </div>
+                                </div>
+                              </div>
+                            </td></tr>
+                          )}
+                        </React.Fragment>
+                      );
+                    })}</tbody>
+                  </table>
+                </div>
+                {list.length===0&&<div style={{textAlign:'center',padding:20,color:G.mut,fontSize:12}}>No completed orders match “{doneQ}”.</div>}
+                {list.length>shown.length&&(
+                  <div style={{textAlign:'center',marginTop:10}}>
+                    <Btn v='outline' sm onClick={()=>setDoneLimit(n=>n+25)}>Show more ({list.length-shown.length} older)</Btn>
                   </div>
-                  <Btn v='info' sm onClick={()=>openEdit(o)}>✏️ Edit Items</Btn>
-                </div>
-                <div style={{marginTop:9,borderTop:`1px solid ${G.brd}`,paddingTop:9}}>
-                  <div style={{fontSize:11,fontWeight:'bold',color:hasTracking(o)?G.gd:G.mut,marginBottom:6}}>📦 Tracking{hasTracking(o)?'':' — none added yet'}</div>
-                  {(o.tracking||[]).map((tk,i)=>(
-                    <div key={i} style={{display:'flex',gap:6,marginBottom:6}}>
-                      <input value={tk} onChange={e=>{const tr=[...o.tracking];tr[i]=e.target.value;upd(o.id,'tracking',tr);}} onBlur={()=>syncOrder(o)} placeholder="e.g. SF1234567890" style={{flex:1,padding:'5px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/>
-                      <button onClick={()=>{const nt=o.tracking.filter((_,j)=>j!==i);upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}} style={{background:'none',border:`1px solid ${G.rd}`,color:G.rd,borderRadius:5,padding:'3px 9px',cursor:'pointer',fontSize:11}}>✕</button>
-                    </div>
-                  ))}
-                  <Btn sm v='info' onClick={()=>{const nt=[...(o.tracking||[]),''];upd(o.id,'tracking',nt);syncOrder({...o,tracking:nt});}}>+ Add Tracking #</Btn>
-                </div>
-              </Card>
+                )}
+              </div>
             );
-          })}
-          {showDone&&done.length>20&&<div style={{fontSize:11,color:G.mut}}>Showing the 20 most recent. Older ones are in the Sales List.</div>}
-        </div>
+          })()}
+        </Card>
       )}
     </div>
   );
@@ -1737,7 +1923,11 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   const [selIt,setSelIt]=useState([]);
   const [sdpct,setSdpct]=useState(10);
   const [curId,setCurId]=useState(null);
-  const [onum,setOnum]=useState(()=>nextSeq(sales));
+  // The next order number is only a preview now: it's worked out live from the
+  // loaded sales (it used to be frozen when the tab first opened — before sales
+  // had loaded after a reload, which produced the duplicate "#1" invoices). The
+  // database assigns the real number on save (Query-32), and we show that one.
+  const onum=nextSeq(sales);
   const [rq,setRq]=useState('');
   const [rsel,setRsel]=useState([]);
   const [saving,setSaving]=useState(false);
@@ -1800,7 +1990,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
     setSelIt([]);
   }
   function resetForm(){
-    setCust({name:'',addr:'',mob:''});setItems([blankSIItem()]);setCtype('Not Free');setCcour('');setDtype('No');setDpct(0);setCdsc('');setCurId(null);setOnum(nextSeq(sales));
+    setCust({name:'',addr:'',mob:''});setItems([blankSIItem()]);setCtype('Not Free');setCcour('');setDtype('No');setDpct(0);setCdsc('');setCurId(null);
   }
   async function save(){
     if(saving) return;
@@ -1852,8 +2042,11 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
       });
       if(error) throw new Error(error.message);
 
+      // Read back the number the database actually assigned.
+      const { data: row } = await supabase.from('sales').select('seq,order_id').eq('id',savedId).single();
+      const realSeq = row && row.seq!=null ? row.seq : seq;
       const saved={
-        id:savedId, seq, date:dt, type:'invoice', oid:`INV${seq}`,
+        id:savedId, seq:realSeq, date:dt, type:'invoice', oid:(row&&row.order_id)||`INV${realSeq}`,
         cname:cust.name, mob:cust.mob, addr:cust.addr,
         sub, disc:damt, discTotal:pad, courier:cour, grand,
         items: lines.map(l=>({pid:l.product_id,name:l.name,qty:l.qty,up:l.unit_price,tp:l.total_price})),
@@ -1861,7 +2054,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
       setSales(p=> curId ? p.map(x=>x.id===curId?saved:x) : [saved,...p]);
       setCurId(savedId);
       if(reloadProducts) await reloadProducts();
-      alert('Sales invoice saved — stock updated.');
+      alert(`Sales invoice #${realSeq} saved — stock updated.`);
     }catch(err){
       alert(err.message || 'Failed to save the invoice.');
     }finally{ setSaving(false); }
@@ -1887,7 +2080,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
       alert('That is a completed online order, not a walk-in invoice.\n\nTo change its items, open the Online Orders tab → "Completed Orders" → Edit Items. That restores the shipped stock and re-deducts correctly. Editing it here would double-count.');
       return;
     }
-    setCurId(s.id); setOnum(s.seq);
+    setCurId(s.id);
     setCust({name:s.cname||'',mob:s.mob||'',addr:s.addr||''});
     setItems([...s.items.map(i=>{
       const p=prods.find(x=>x.id===i.pid) || prods.find(x=>x.name===i.name);
@@ -1908,7 +2101,9 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
     if(reloadProducts) await reloadProducts();
   }
   function printSale(s){
-    openPrintWindow(buildSalesReceiptHTML({orderNo:s.seq,cname:s.cname,mob:s.mob,addr:s.addr,items:s.items,sub:s.sub,pad:s.discTotal,cour:s.courier,grand:s.grand,hasDsc:s.disc>0,qr:qrCodes}));
+    // Saved sale lines don't carry the pack size, so look it up for the receipt.
+    const items=(s.items||[]).map(i=>{const p=prods.find(x=>x.id===i.pid)||prods.find(x=>x.name===i.name);return {...i,pw:i.pw||(p?p.pw:'')};});
+    openPrintWindow(buildSalesReceiptHTML({orderNo:s.seq,cname:s.cname,mob:s.mob,addr:s.addr,items,sub:s.sub,pad:s.discTotal,cour:s.courier,grand:s.grand,hasDsc:s.disc>0,qr:qrCodes}));
   }
 
   const recent = useMemo(()=>{
@@ -2027,16 +2222,179 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   );
 }
 
-// Tier badge colours — Bronze/Silver/Gold.
-const tierBg=(t)=>t==='Gold'?'#FFF4CC':t==='Silver'?'#ECEFF1':'#F6E7D8';
-const tierFg=(t)=>t==='Gold'?'#8a6d00':t==='Silver'?'#546E7A':'#8D5524';
+// Tier badge colours — Bronze/Silver/Gold/Platinum.
+const TIERS=['Bronze','Silver','Gold','Platinum'];
+const tierBg=(t)=>t==='Platinum'?'#ECE8F7':t==='Gold'?'#FFF4CC':t==='Silver'?'#ECEFF1':'#F6E7D8';
+const tierFg=(t)=>t==='Platinum'?'#4A3A8C':t==='Gold'?'#8a6d00':t==='Silver'?'#546E7A':'#8D5524';
+
+// Shared form bits. Every input is border-box and every grid cell can shrink, so
+// fields never spill into their neighbours (the old settings grid overlapped).
+const inBox={width:'100%',boxSizing:'border-box',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13,minWidth:0};
+function SetField({label,value,onChange,type='number',step='0.01',placeholder,disabled}){
+  return(
+    <label style={{display:'flex',flexDirection:'column',gap:4,minWidth:0,textAlign:'left'}}>
+      <span style={{fontSize:11,color:G.mut,lineHeight:1.3,minHeight:15}}>{label}</span>
+      <input type={type} step={type==='number'?step:undefined} value={value??''} placeholder={placeholder} disabled={disabled}
+        onChange={e=>onChange(e.target.value)} style={{...inBox,background:disabled?G.bg:G.w}}/>
+    </label>
+  );
+}
+const formGrid=(min)=>({display:'grid',gridTemplateColumns:`repeat(auto-fit,minmax(${min}px,1fr))`,gap:12,alignItems:'end',marginBottom:12});
+
+// Everyone who has signed up — loaded once, on demand, for the pickers below.
+function useCustomerList(enabled){
+  const [list,setList]=useState(null);
+  useEffect(()=>{
+    if(!enabled||list) return;
+    let alive=true;
+    supabase.rpc('admin_list_customers').then(({data,error})=>{ if(alive) setList(error?[]:(data||[])); });
+    return ()=>{ alive=false; };
+  },[enabled,list]);
+  return list;
+}
+
+// Search a customer by name, email or mobile and pick one.
+function CustomerPicker({customers,onPick,exclude=[]}){
+  const [q,setQ]=useState('');
+  const lq=q.trim().toLowerCase();
+  const matches=(customers||[]).filter(c=>!exclude.includes(c.id)&&(!lq||
+    (c.full_name||'').toLowerCase().includes(lq)||(c.email||'').toLowerCase().includes(lq)||(c.mobile||'').includes(lq))).slice(0,8);
+  return(
+    <div style={{textAlign:'left'}}>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search name, email or mobile…" style={inBox}/>
+      <div style={{border:`1px solid ${G.brd}`,borderRadius:7,marginTop:6,maxHeight:220,overflowY:'auto'}}>
+        {customers===null
+          ? <div style={{padding:10,fontSize:12,color:G.mut}}>Loading customers…</div>
+          : matches.length===0
+            ? <div style={{padding:10,fontSize:12,color:G.mut}}>No customer matches “{q}”.</div>
+            : matches.map(c=>(
+                <div key={c.id} onClick={()=>onPick(c)} style={{padding:'8px 10px',cursor:'pointer',borderBottom:`1px solid ${G.bg}`,display:'flex',justifyContent:'space-between',gap:8,alignItems:'center'}}>
+                  <div style={{minWidth:0}}>
+                    <div style={{fontWeight:'bold',fontSize:12,color:G.dk}}>{c.full_name||'(no name)'}</div>
+                    <div style={{fontSize:11,color:G.mut,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.email||'—'}{c.mobile?` · ${c.mobile}`:''}</div>
+                  </div>
+                  <span style={{background:tierBg(c.tier),color:tierFg(c.tier),borderRadius:9,padding:'1px 7px',fontSize:9,fontWeight:'bold',flexShrink:0}}>{c.tier||'Bronze'}</span>
+                </div>
+              ))}
+      </div>
+    </div>
+  );
+}
+
+const randCouponCode=()=>'TOD'+Math.random().toString(36).slice(2,7).toUpperCase();
+
+// One coupon form, used from the Customers tab (a personal coupon for that
+// customer), from a leaderboard prize, and from the Competitions tab (all
+// customers, or one you search for). Every coupon lands in the same coupons
+// table, so it shows up in Competitions → Coupons with who it was given to.
+//   initial.customer = {id, full_name, email} → locked to that customer
+function CouponForm({initial,onClose,onSaved}){
+  const locked=!!(initial&&initial.lockCustomer);
+  const [f,setF]=useState(()=>({code:randCouponCode(),kind:'fixed',value:'',min_order:0,expires_on:'',note:'',
+    audience:initial&&initial.customer?'one':'all',customer:null,max_uses:'',...(initial||{})}));
+  const [busy,setBusy]=useState(false);
+  const customers=useCustomerList(!locked);
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  // Sensible default for "how many uses": one for a personal coupon; for an
+  // everyone-coupon, one per signed-up customer.
+  const defUses=f.audience==='one'?1:(customers?Math.max(1,customers.length):1);
+  async function save(){
+    if(!String(f.code).trim()){ alert('Give the coupon a code.'); return; }
+    if(!(+f.value>0)){ alert('Enter a value greater than 0.'); return; }
+    if(f.kind==='percent'&&+f.value>100){ alert('A percentage coupon can’t be more than 100%.'); return; }
+    if(f.audience==='one'&&!f.customer){ alert('Pick the customer this coupon is for.'); return; }
+    setBusy(true);
+    try{
+      const payload={code:String(f.code).trim().toUpperCase(),kind:f.kind,value:+f.value,min_order:+f.min_order||0,
+        customer_id:f.audience==='one'?f.customer.id:'',max_uses:+f.max_uses>0?+f.max_uses:defUses,
+        starts_on:'',expires_on:f.expires_on||'',note:f.note||''};
+      const { error }=await supabase.rpc('admin_issue_coupon',{p:payload});
+      if(error){
+        alert(/duplicate|unique/i.test(error.message)?'That code is already used — pick another (or tap 🎲).':'Could not create coupon:\n\n'+error.message);
+        return;
+      }
+      if(onSaved) onSaved(payload);
+      onClose();
+    } finally { setBusy(false); }
+  }
+  const who=f.customer;
+  return(
+    <Overlay title={who&&f.audience==='one'?`Issue coupon — ${who.full_name||who.email||'customer'}`:'Issue coupon'} onClose={onClose} width={560}>
+      <div style={{textAlign:'left'}}>
+        {!locked&&(
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>WHO CAN USE IT</div>
+            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+              {[['all','👥 All customers'],['one','👤 One customer']].map(([k,l])=>(
+                <button key={k} onClick={()=>set('audience',k)} style={{flex:'1 1 150px',padding:'9px 10px',borderRadius:8,cursor:'pointer',fontSize:12,fontWeight:'bold',
+                  border:`2px solid ${f.audience===k?G.gm:G.brd}`,background:f.audience===k?G.gl:G.w,color:f.audience===k?G.gd:G.tx}}>{l}</button>
+              ))}
+            </div>
+          </div>
+        )}
+        {f.audience==='one'&&(
+          who
+            ? <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,background:G.gl,border:`1px solid ${G.g}`,borderRadius:8,padding:'9px 11px',marginBottom:14}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontWeight:'bold',fontSize:13,color:G.gd}}>👤 {who.full_name||'(no name)'}</div>
+                  <div style={{fontSize:11,color:G.tx}}>{who.email||'—'}{who.mobile?` · ${who.mobile}`:''}</div>
+                </div>
+                {!locked&&<button onClick={()=>set('customer',null)} style={{background:G.w,border:`1px solid ${G.brd}`,borderRadius:6,padding:'4px 10px',cursor:'pointer',fontSize:11}}>Change</button>}
+              </div>
+            : <div style={{marginBottom:14}}><CustomerPicker customers={customers} onPick={c=>set('customer',c)}/></div>
+        )}
+        <div style={formGrid(150)}>
+          <label style={{display:'flex',flexDirection:'column',gap:4,minWidth:0}}>
+            <span style={{fontSize:11,color:G.mut}}>Code</span>
+            <div style={{display:'flex',gap:6}}>
+              <input value={f.code} onChange={e=>set('code',e.target.value.toUpperCase())} style={{...inBox,fontWeight:'bold',letterSpacing:1}}/>
+              <button title="New random code" onClick={()=>set('code',randCouponCode())} style={{background:G.bg,border:`1px solid ${G.brd}`,borderRadius:6,cursor:'pointer',padding:'0 9px'}}>🎲</button>
+            </div>
+          </label>
+          <label style={{display:'flex',flexDirection:'column',gap:4,minWidth:0}}>
+            <span style={{fontSize:11,color:G.mut}}>Type</span>
+            <select value={f.kind} onChange={e=>set('kind',e.target.value)} style={inBox}>
+              <option value="fixed">¥ off</option><option value="percent">% off</option>
+            </select>
+          </label>
+          <SetField label={f.kind==='percent'?'Value (% off)':'Value (¥ off)'} value={f.value} onChange={v=>set('value',v)}/>
+          <SetField label="Minimum order ¥" value={f.min_order} onChange={v=>set('min_order',v)}/>
+          <SetField label="Expires on" type="date" value={f.expires_on} onChange={v=>set('expires_on',v)}/>
+          <SetField label="Max uses (total)" step="1" value={f.max_uses} placeholder={String(defUses)} onChange={v=>set('max_uses',v)}/>
+        </div>
+        <SetField label="Reason / note (shown in the coupon list)" type="text" value={f.note} placeholder="e.g. Sorry for the late delivery" onChange={v=>set('note',v)}/>
+        <div style={{fontSize:11,color:G.mut,margin:'10px 0'}}>
+          {f.audience==='one'
+            ? (who?`Only ${who.full_name||'this customer'} can use this code.`:'Pick a customer above.')
+            : 'Anyone with the code can use it, until the max uses run out.'}
+        </div>
+        <div style={{display:'flex',gap:8}}>
+          <Btn onClick={save} disabled={busy}>{busy?'Creating…':'🎁 Create Coupon'}</Btn>
+          <button onClick={onClose} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
+// Coupons with the customer they belong to. Falls back to the plain list if
+// Query-33 hasn't been run yet.
+async function loadCouponsFull(){
+  const r=await supabase.rpc('admin_list_coupons_full');
+  if(!r.error) return r.data||[];
+  const r2=await supabase.rpc('admin_list_coupons');
+  return r2.error?[]:(r2.data||[]);
+}
+function couponLine(cp){
+  return `${cp.kind==='percent'?`${cp.value}% off`:`¥${cp.value} off`}${+cp.min_order>0?` · min ¥${cp.min_order}`:''}${cp.expires_on?` · expires ${cp.expires_on}`:''} · used ${cp.used_count||0}/${cp.max_uses||1}`;
+}
 
 // ==================== Customers ====================
 // Everyone who has signed up, with the contact details they saved and a quick read
 // on how much business they've done. The data comes from the admin_list_customers
 // RPC rather than a plain table read, because verification status lives in the
 // protected auth schema and the order/spend totals need a server-side join.
-function CustTab() {
+function CustTab({couponVer=0,onCouponsChanged}) {
   const [rows,setRows]=useState(null);   // null = still loading
   const [err,setErr]=useState('');
   const [q,setQ]=useState('');
@@ -2046,6 +2404,8 @@ function CustTab() {
   const [showSt,setShowSt]=useState(false);
   const [savingSt,setSavingSt]=useState(false);
   const [adj,setAdj]=useState(null);     // {id,name,delta,note}
+  const [coupons,setCoupons]=useState([]);
+  const [cpFor,setCpFor]=useState(null); // customer a coupon is being issued to
 
   async function loadCustomers(){
     const { data, error }=await supabase.rpc('admin_list_customers');
@@ -2065,14 +2425,18 @@ function CustTab() {
     })();
     return ()=>{ alive=false; };
   },[]);
+  useEffect(()=>{ let alive=true; loadCouponsFull().then(d=>{ if(alive) setCoupons(d); }); return ()=>{ alive=false; }; },[couponVer]);
 
   const stField=(k,v)=>setSt(s=>({...s,[k]:v}));
+  const stPerk=(t,v)=>setSt(s=>({...s,tier_perks:{...(s.tier_perks||{}),[t]:v}}));
   async function saveSettings(){
+    const sv=+st.silver_at||0, gv=+st.gold_at||0, pv=+st.platinum_at||0;
+    if(!(sv<gv&&gv<pv)){ alert('Tier thresholds must go up: Silver < Gold < Platinum.'); return; }
     setSavingSt(true);
     try{
       const { error }=await supabase.rpc('admin_save_loyalty_settings',{p:st});
       if(error) alert('Could not save settings:\n\n'+error.message);
-      else alert('Settings saved.');
+      else { alert('Settings saved.'); loadCustomers(); }
     } finally { setSavingSt(false); }
   }
   async function applyAdjust(){
@@ -2111,11 +2475,14 @@ function CustTab() {
   },[rows]);
 
   const fmtDate=(ts)=>ts?String(ts).slice(0,10):'—';
+  const pctBack=(mult)=>100*(+st?.points_per_yuan||0)*(+mult||0)*(+st?.yuan_per_point||0);  // % of spend returned
 
   if(rows===null) return <Card><div style={{textAlign:'center',padding:40,color:G.mut}}>Loading customers…</div></Card>;
 
   return(
     <div>
+      {cpFor&&<CouponForm initial={{customer:cpFor,lockCustomer:true,audience:'one',max_uses:1}} onClose={()=>setCpFor(null)}
+        onSaved={()=>{ if(onCouponsChanged) onCouponsChanged(); }}/>}
       <h2 style={{margin:'0 0 14px',fontSize:19,color:G.gd}}>👥 Customers</h2>
       {err&&<Card style={{marginBottom:12}}><div style={{color:G.rd,fontSize:13}}>Could not load customers: {err}</div></Card>}
 
@@ -2128,11 +2495,11 @@ function CustTab() {
           </span>
         </div>
         {showSt&&st&&(
-          <div style={{marginTop:12,borderTop:`1px solid ${G.brd}`,paddingTop:12}}>
+          <div style={{marginTop:12,borderTop:`1px solid ${G.brd}`,paddingTop:12,textAlign:'left'}}>
             <div style={{fontSize:11,color:G.mut,marginBottom:10}}>
               Set these once you know your post-launch margin. Nothing is applied to customers while a program is switched off.
             </div>
-            <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:12}}>
+            <div style={{display:'flex',gap:16,flexWrap:'wrap',marginBottom:14}}>
               <label style={{fontSize:13,display:'flex',alignItems:'center',gap:6,fontWeight:'bold',color:G.tx}}>
                 <input type="checkbox" checked={!!st.points_enabled} onChange={e=>stField('points_enabled',e.target.checked)}/> Points program active
               </label>
@@ -2140,56 +2507,55 @@ function CustTab() {
                 <input type="checkbox" checked={!!st.ref_enabled} onChange={e=>stField('ref_enabled',e.target.checked)}/> Referral program active
               </label>
             </div>
-            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>EARNING &amp; REDEEMING</div>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:10,marginBottom:12}}>
-              {[
-                ['points_per_yuan','Points earned per ¥1','number'],
-                ['yuan_per_point','¥ value of 1 point','number'],
-                ['redeem_cap_yuan','Max ¥ off per order','number'],
-                ['redeem_max_pct','Max % of subtotal','number'],
-                ['points_expiry_months','Points expire after (months, 0 = never)','number'],
-              ].map(([k,l])=>(
-                <div key={k}>
-                  <div style={{fontSize:11,color:G.mut,marginBottom:3}}>{l}</div>
-                  <input type="number" step="0.01" value={st[k]??''} onChange={e=>stField(k,e.target.value)}
-                    style={{width:'100%',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-                </div>
-              ))}
-              <div style={{display:'flex',alignItems:'flex-end'}}>
-                <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,color:G.tx}}>
-                  <input type="checkbox" checked={!!st.earn_on_courier} onChange={e=>stField('earn_on_courier',e.target.checked)}/> Earn points on courier too
-                </label>
-              </div>
+
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:8}}>EARNING &amp; REDEEMING</div>
+            <div style={formGrid(170)}>
+              <SetField label="Points earned per ¥1" value={st.points_per_yuan} onChange={v=>stField('points_per_yuan',v)}/>
+              <SetField label="¥ value of 1 point" value={st.yuan_per_point} onChange={v=>stField('yuan_per_point',v)}/>
+              <SetField label="Max ¥ off per order" value={st.redeem_cap_yuan} onChange={v=>stField('redeem_cap_yuan',v)}/>
+              <SetField label="Max % of subtotal" value={st.redeem_max_pct} onChange={v=>stField('redeem_max_pct',v)}/>
+              <SetField label="Points expire after (months, 0 = never)" step="1" value={st.points_expiry_months} onChange={v=>stField('points_expiry_months',v)}/>
             </div>
+            <label style={{fontSize:12,display:'flex',alignItems:'center',gap:6,color:G.tx,marginBottom:12}}>
+              <input type="checkbox" checked={!!st.earn_on_courier} onChange={e=>stField('earn_on_courier',e.target.checked)}/> Earn points on courier too
+            </label>
             {st.yuan_per_point>0&&(
-              <div style={{fontSize:11,color:G.mut,marginBottom:12,background:G.bg,padding:'7px 10px',borderRadius:6}}>
-                At these rates a ¥100 order earns <b>{Math.round(100*(+st.points_per_yuan||0))} points</b>, worth about <b>¥{(100*(+st.points_per_yuan||0)*(+st.yuan_per_point||0)).toFixed(2)}</b> — roughly <b>{(100*(+st.points_per_yuan||0)*(+st.yuan_per_point||0)).toFixed(1)}%</b> back.
+              <div style={{fontSize:11,color:G.mut,marginBottom:16,background:G.bg,padding:'7px 10px',borderRadius:6}}>
+                At these rates a ¥100 order earns <b>{Math.round(100*(+st.points_per_yuan||0))} points</b>, worth about <b>¥{(100*(+st.points_per_yuan||0)*(+st.yuan_per_point||0)).toFixed(2)}</b> — roughly <b>{(100*(+st.points_per_yuan||0)*(+st.yuan_per_point||0)).toFixed(1)}%</b> back (before the tier multiplier).
               </div>
             )}
-            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>TIERS (lifetime spend)</div>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:12}}>
-              {[['silver_at','Silver from ¥'],['gold_at','Gold from ¥'],
-                ['bronze_mult','Bronze earn ×'],['silver_mult','Silver earn ×'],['gold_mult','Gold earn ×']].map(([k,l])=>(
-                <div key={k}>
-                  <div style={{fontSize:11,color:G.mut,marginBottom:3}}>{l}</div>
-                  <input type="number" step="0.01" value={st[k]??''} onChange={e=>stField(k,e.target.value)}
-                    style={{width:'100%',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-                </div>
-              ))}
+
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:8}}>TIERS (lifetime spend)</div>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:12,marginBottom:16}}>
+              {TIERS.map(t=>{
+                const atKey=t==='Bronze'?null:`${t.toLowerCase()}_at`;
+                const multKey=`${t.toLowerCase()}_mult`;
+                return(
+                  <div key={t} style={{border:`1px solid ${G.brd}`,borderTop:`4px solid ${tierFg(t)}`,borderRadius:9,padding:11,background:G.w,minWidth:0}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+                      <span style={{background:tierBg(t),color:tierFg(t),borderRadius:9,padding:'2px 10px',fontSize:11,fontWeight:'bold'}}>{t}</span>
+                      <span style={{fontSize:10,color:G.mut}}>≈ {pctBack(st[multKey]).toFixed(1)}% back</span>
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:8}}>
+                      {atKey
+                        ? <SetField label="From ¥ spent" step="1" value={st[atKey]} onChange={v=>stField(atKey,v)}/>
+                        : <SetField label="From ¥ spent" value="0" disabled onChange={()=>{}}/>}
+                      <SetField label="Earn ×" value={st[multKey]} onChange={v=>stField(multKey,v)}/>
+                    </div>
+                    <SetField label="Perk shown to customers (optional)" type="text" value={(st.tier_perks||{})[t]||''}
+                      placeholder={t==='Bronze'?'e.g. Welcome member':'e.g. Free courier over ¥200'} onChange={v=>stPerk(t,v)}/>
+                  </div>
+                );
+              })}
             </div>
-            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>REFERRALS</div>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:10,marginBottom:12}}>
-              {[['ref_friend_discount','¥ off friend\'s first order'],
-                ['ref_min_order','Friend\'s order must reach ¥'],
-                ['ref_referrer_points','Points to referrer after it completes']].map(([k,l])=>(
-                <div key={k}>
-                  <div style={{fontSize:11,color:G.mut,marginBottom:3}}>{l}</div>
-                  <input type="number" step="0.01" value={st[k]??''} onChange={e=>stField(k,e.target.value)}
-                    style={{width:'100%',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-                </div>
-              ))}
+
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:8}}>REFERRALS</div>
+            <div style={formGrid(180)}>
+              <SetField label="¥ off friend's first order" value={st.ref_friend_discount} onChange={v=>stField('ref_friend_discount',v)}/>
+              <SetField label="Friend's order must reach ¥" value={st.ref_min_order} onChange={v=>stField('ref_min_order',v)}/>
+              <SetField label="Points to referrer after it completes" step="1" value={st.ref_referrer_points} onChange={v=>stField('ref_referrer_points',v)}/>
             </div>
-            <Btn onClick={saveSettings} disabled={savingSt}>{savingSt?'Saving…':'💾 Save Settings'}</Btn>
+            <div style={{textAlign:'center'}}><Btn onClick={saveSettings} disabled={savingSt}>{savingSt?'Saving…':'💾 Save Settings'}</Btn></div>
           </div>
         )}
       </Card>
@@ -2204,7 +2570,7 @@ function CustTab() {
       <Card style={{marginBottom:12}}>
         <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
           <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search name, mobile, email or address…"
-            style={{flex:'1 1 240px',padding:'9px 12px',borderRadius:7,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            style={{flex:'1 1 240px',padding:'9px 12px',borderRadius:7,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box',minWidth:0}}/>
           {[['all','All'],['verified','Verified'],['unverified','Unverified']].map(([k,l])=>(
             <button key={k} onClick={()=>setOnly(k)} style={{
               background:only===k?G.gm:G.w,color:only===k?G.w:G.tx,
@@ -2219,10 +2585,11 @@ function CustTab() {
         : list.map(c=>{
             const open=openId===c.id;
             const addrs=Array.isArray(c.addresses)?c.addresses:[];
+            const myCoupons=coupons.filter(cp=>cp.customer_id===c.id);
             return(
               <Card key={c.id} style={{marginBottom:10}}>
                 <div onClick={()=>setOpenId(open?null:c.id)} style={{cursor:'pointer',display:'flex',justifyContent:'space-between',gap:10,alignItems:'flex-start',flexWrap:'wrap'}}>
-                  <div style={{minWidth:0,flex:'1 1 220px'}}>
+                  <div style={{minWidth:0,flex:'1 1 220px',textAlign:'left'}}>
                     <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
                       <span style={{fontWeight:'bold',fontSize:14,color:G.gd}}>{c.full_name||'(no name)'}</span>
                       <span style={{background:tierBg(c.tier),color:tierFg(c.tier),borderRadius:9,padding:'2px 8px',fontSize:10,fontWeight:'bold'}}>
@@ -2231,6 +2598,7 @@ function CustTab() {
                       <span style={{background:c.verified?G.gl:G.goldl,color:c.verified?G.gd:'#8a6d00',borderRadius:9,padding:'2px 8px',fontSize:10,fontWeight:'bold'}}>
                         {c.verified?'✅ Verified':'⏳ Unverified'}
                       </span>
+                      {myCoupons.length>0&&<span style={{background:G.pl,color:G.pd,borderRadius:9,padding:'2px 8px',fontSize:10,fontWeight:'bold'}}>🎁 {myCoupons.length}</span>}
                       <span style={{color:G.mut,fontSize:12}}>{open?'▾':'▸'}</span>
                     </div>
                     <div style={{fontSize:12,color:G.tx,marginTop:3}}>📱 {c.mobile||'—'}</div>
@@ -2244,7 +2612,7 @@ function CustTab() {
                   </div>
                 </div>
                 {open&&(
-                  <div style={{marginTop:10,borderTop:`1px solid ${G.brd}`,paddingTop:10}}>
+                  <div style={{marginTop:10,borderTop:`1px solid ${G.brd}`,paddingTop:10,textAlign:'left'}}>
                     <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>📍 Saved Addresses ({addrs.length})</div>
                     {addrs.length===0
                       ? <div style={{fontSize:12,color:G.mut}}>No address saved yet.</div>
@@ -2273,21 +2641,34 @@ function CustTab() {
                       </div>
                     </div>
 
+                    <div style={{marginTop:10}}>
+                      <div style={{fontSize:11,fontWeight:'bold',color:G.pd,marginBottom:6}}>🎁 Coupons for this customer ({myCoupons.length})</div>
+                      {myCoupons.length===0
+                        ? <div style={{fontSize:12,color:G.mut}}>None issued yet.</div>
+                        : myCoupons.map(cp=>(
+                            <div key={cp.id} style={{background:G.bg,borderRadius:7,padding:'6px 10px',marginBottom:5,fontSize:12,display:'flex',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
+                              <span><b style={{letterSpacing:1,color:G.gd}}>{cp.code}</b> · {couponLine(cp)}{cp.note?<span style={{color:G.mut}}> · {cp.note}</span>:null}</span>
+                              <span style={{fontSize:10,fontWeight:'bold',color:cp.active?G.gd:G.mut}}>{cp.active?'Active':'Disabled'}</span>
+                            </div>
+                          ))}
+                    </div>
+
                     {adj&&adj.id===c.id
                       ? <div style={{marginTop:10,background:G.bl,borderRadius:7,padding:10}}>
                           <div style={{fontSize:11,color:G.bd,fontWeight:'bold',marginBottom:6}}>Adjust points for {adj.name}</div>
                           <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
                             <input type="number" value={adj.delta} onChange={e=>setAdj(a=>({...a,delta:e.target.value}))}
-                              placeholder="e.g. 500 or -200" style={{width:130,padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+                              placeholder="e.g. 500 or -200" style={{width:130,padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box'}}/>
                             <input value={adj.note} onChange={e=>setAdj(a=>({...a,note:e.target.value}))}
-                              placeholder="Reason (e.g. competition prize)" style={{flex:'1 1 180px',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+                              placeholder="Reason (e.g. competition prize)" style={{flex:'1 1 180px',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13,boxSizing:'border-box',minWidth:0}}/>
                             <Btn sm onClick={applyAdjust}>Apply</Btn>
                             <button onClick={()=>setAdj(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 12px',cursor:'pointer',fontSize:12}}>Cancel</button>
                           </div>
                           <div style={{fontSize:10,color:G.mut,marginTop:6}}>Use a minus sign to deduct. Every adjustment is recorded in the points history.</div>
                         </div>
-                      : <div style={{marginTop:10}}>
+                      : <div style={{marginTop:10,display:'flex',gap:8,flexWrap:'wrap'}}>
                           <Btn v='info' sm onClick={()=>setAdj({id:c.id,name:c.full_name||'this customer',delta:'',note:''})}>⭐ Adjust Points</Btn>
+                          <Btn sm onClick={()=>setCpFor({id:c.id,full_name:c.full_name,email:c.email,mobile:c.mobile})}>🎁 Issue Coupon</Btn>
                         </div>}
                   </div>
                 )}
@@ -2299,29 +2680,34 @@ function CustTab() {
 }
 
 // ==================== Competitions & Coupons ====================
-// Fully flexible: you set the name, the date range, whether it ranks by spending or
-// referrals, and however many prize places you want. The leaderboard is computed
-// live from real sales/referral data, and a winner can be paid out as a personal
-// coupon in one click.
-function CompTab() {
+// Fully flexible: you set the name, the date range, what it ranks by (referrals,
+// spending, or a custom score you enter yourself), what to call that ranking, and
+// however many prize places you want. Referral and spending leaderboards are
+// computed live from real data; a winner can be paid out as a personal coupon.
+const KIND_DEFAULT={referral:'Referrals',spending:'Spending (¥)',custom:'Score'};
+const rankedLabel=(c)=>(c.ranked_label&&String(c.ranked_label).trim())||KIND_DEFAULT[c.kind]||'Score';
+
+function CompTab({couponVer=0,onCouponsChanged}) {
   const [comps,setComps]=useState(null);
   const [coupons,setCoupons]=useState([]);
   const [form,setForm]=useState(null);       // competition being created/edited
-  const [board,setBoard]=useState(null);     // {comp, rows}
-  const [cform,setCform]=useState(null);     // coupon being issued
+  const [board,setBoard]=useState(null);     // {comp, rows, edit?}
+  const [cform,setCform]=useState(null);     // coupon being issued (initial values)
   const [busy,setBusy]=useState(false);
+  const [cq,setCq]=useState('');             // coupon search
+  const customers=useCustomerList(!!(board&&board.comp.kind==='custom'));
 
   async function loadAll(){
     const [c,cp]=await Promise.all([
       supabase.from('competitions').select('*').order('starts_on',{ascending:false}),
-      supabase.rpc('admin_list_coupons'),
+      loadCouponsFull(),
     ]);
     setComps(c.error?[]:(c.data||[]));
-    setCoupons(cp.error?[]:(cp.data||[]));
+    setCoupons(cp);
   }
-  useEffect(()=>{ loadAll(); },[]);
+  useEffect(()=>{ loadAll(); },[couponVer]);
 
-  const blank=()=>({id:'',name:'',kind:'referral',starts_on:bjDate(),ends_on:bjDate(),status:'draft',
+  const blank=()=>({id:'',name:'',kind:'referral',ranked_label:'',starts_on:bjDate(),ends_on:bjDate(),status:'draft',
                     prizes:[{place:1,label:'1st Prize',amount:50}]});
 
   function setPrize(i,k,v){ setForm(f=>({...f,prizes:f.prizes.map((p,j)=>j===i?{...p,[k]:v}:p)})); }
@@ -2330,10 +2716,13 @@ function CompTab() {
 
   async function saveComp(){
     if(!form.name.trim()){ alert('Give the competition a name.'); return; }
+    if(form.kind==='custom'&&!String(form.ranked_label||'').trim()){ alert('A custom competition needs a "Ranked by" name — e.g. "Recipe votes".'); return; }
     if(new Date(form.ends_on)<new Date(form.starts_on)){ alert('The end date is before the start date.'); return; }
     setBusy(true);
     try{
-      const payload={...form, prizes:form.prizes.map(p=>({...p,amount:+p.amount||0}))};
+      const payload={id:form.id,name:form.name,kind:form.kind,ranked_label:form.ranked_label||'',
+        starts_on:form.starts_on,ends_on:form.ends_on,status:form.status,
+        prizes:form.prizes.map(p=>({...p,amount:+p.amount||0}))};
       if(!payload.id) delete payload.id;
       const { error }=await supabase.rpc('admin_save_competition',{p:payload});
       if(error){ alert('Could not save:\n\n'+error.message); return; }
@@ -2346,18 +2735,30 @@ function CompTab() {
     if(error){ alert(error.message); return; }
     await loadAll();
   }
+  // Custom competitions: you type the scores; ranks are worked out here (ties share a place).
+  const rankRows=(rows)=>{
+    const sorted=[...rows].sort((a,b)=>(+b.score||0)-(+a.score||0));
+    let last=null, rank=0;
+    return sorted.map((r,i)=>{ if(+r.score!==last){ rank=i+1; last=+r.score; } return {...r,rank}; });
+  };
   async function openBoard(c){
+    if(c.kind==='custom'){
+      setBoard({comp:c,rows:rankRows(Array.isArray(c.results)?c.results:[]),edit:Array.isArray(c.results)?c.results.map(r=>({...r})):[]});
+      return;
+    }
     setBoard({comp:c,rows:null});
     const { data,error }=await supabase.rpc('admin_competition_leaderboard',{p_id:c.id});
     setBoard({comp:c,rows:error?[]:(data||[]),err:error?error.message:''});
   }
-  async function issueCoupon(){
-    if(!cform.code.trim()||!cform.value){ alert('A coupon needs a code and a value.'); return; }
+  async function saveScores(){
+    const results=(board.edit||[]).map(r=>({customer_id:r.customer_id,name:r.name,mobile:r.mobile||'',score:+r.score||0}));
     setBusy(true);
     try{
-      const { error }=await supabase.rpc('admin_issue_coupon',{p:cform});
-      if(error){ alert('Could not create coupon:\n\n'+error.message); return; }
-      setCform(null); await loadAll();
+      const { error }=await supabase.rpc('admin_save_competition',{p:{id:board.comp.id,results}});
+      if(error){ alert('Could not save scores:\n\n'+error.message); return; }
+      const comp={...board.comp,results};
+      setBoard(b=>({...b,comp,rows:rankRows(results)}));
+      setComps(cs=>(cs||[]).map(x=>x.id===comp.id?comp:x));
     } finally { setBusy(false); }
   }
   async function toggleCoupon(cp){
@@ -2365,11 +2766,16 @@ function CompTab() {
     if(error){ alert(error.message); return; }
     await loadAll();
   }
-  const randCode=()=>'TOD'+Math.random().toString(36).slice(2,7).toUpperCase();
+  const couponsShown=useMemo(()=>{
+    const lq=cq.trim().toLowerCase();
+    if(!lq) return coupons;
+    return coupons.filter(cp=>[cp.code,cp.note,cp.customer_name,cp.customer_email].some(x=>(x||'').toLowerCase().includes(lq)));
+  },[coupons,cq]);
 
   if(comps===null) return <Card><div style={{textAlign:'center',padding:40,color:G.mut}}>Loading…</div></Card>;
 
   const stC={draft:{bg:G.bg,c:G.mut},running:{bg:G.gl,c:G.gd},closed:{bg:G.goldl,c:'#8a6d00'}};
+  const fmtScore=(c,v)=>c.kind==='spending'?`¥${(+v).toFixed(2)}`:c.kind==='referral'?`${+v} refs`:`${+v}`;
 
   return(
     <div>
@@ -2379,154 +2785,128 @@ function CompTab() {
       </div>
 
       {form&&(
-        <Overlay title={form.id?'Edit competition':'New competition'} onClose={()=>setForm(null)} width={620}>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(200px,1fr))',gap:10,marginBottom:12}}>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Name</div>
-              <input value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder="e.g. October Referral Race"
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+        <Overlay title={form.id?'Edit competition':'New competition'} onClose={()=>setForm(null)} width={640}>
+          <div style={{textAlign:'left'}}>
+            <div style={formGrid(220)}>
+              <SetField label="Name" type="text" value={form.name} placeholder="e.g. October Referral Race" onChange={v=>setForm(f=>({...f,name:v}))}/>
+              <label style={{display:'flex',flexDirection:'column',gap:4,minWidth:0}}>
+                <span style={{fontSize:11,color:G.mut}}>Ranked by</span>
+                <select value={form.kind} onChange={e=>setForm(f=>({...f,kind:e.target.value}))} style={inBox}>
+                  <option value="referral">Referrals (new customers brought in)</option>
+                  <option value="spending">Spending (¥ spent in the period)</option>
+                  <option value="custom">Custom — I'll enter the scores</option>
+                </select>
+              </label>
             </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Ranked by</div>
-              <select value={form.kind} onChange={e=>setForm(f=>({...f,kind:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}>
-                <option value="referral">Referrals (new customers brought in)</option>
-                <option value="spending">Spending (¥ spent in the period)</option>
-              </select>
+            <div style={formGrid(220)}>
+              <SetField label={`"Ranked by" name shown on the leaderboard${form.kind==='custom'?' *':' (optional)'}`} type="text"
+                value={form.ranked_label||''} onChange={v=>setForm(f=>({...f,ranked_label:v}))}
+                placeholder={form.kind==='custom'?'e.g. Recipe votes, Photos shared':form.kind==='spending'?'e.g. Biggest Basket':'e.g. Top Referrer'}/>
+              <label style={{display:'flex',flexDirection:'column',gap:4,minWidth:0}}>
+                <span style={{fontSize:11,color:G.mut}}>Status</span>
+                <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))} style={inBox}>
+                  <option value="draft">Draft (not visible yet)</option>
+                  <option value="running">Running</option>
+                  <option value="closed">Closed</option>
+                </select>
+              </label>
             </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Starts</div>
-              <input type="date" value={form.starts_on} onChange={e=>setForm(f=>({...f,starts_on:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
+            <div style={formGrid(180)}>
+              <SetField label="Starts" type="date" value={form.starts_on} onChange={v=>setForm(f=>({...f,starts_on:v}))}/>
+              <SetField label="Ends" type="date" value={form.ends_on} onChange={v=>setForm(f=>({...f,ends_on:v}))}/>
             </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Ends</div>
-              <input type="date" value={form.ends_on} onChange={e=>setForm(f=>({...f,ends_on:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-            </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Status</div>
-              <select value={form.status} onChange={e=>setForm(f=>({...f,status:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}>
-                <option value="draft">Draft (not visible yet)</option>
-                <option value="running">Running</option>
-                <option value="closed">Closed</option>
-              </select>
-            </div>
-          </div>
+            {form.kind==='custom'&&<div style={{fontSize:11,color:G.mut,background:G.bg,borderRadius:6,padding:'7px 10px',marginBottom:12}}>For a custom competition you add the participants and type their scores yourself from the 🏆 Leaderboard button.</div>}
 
-          <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>PRIZES</div>
-          {form.prizes.map((p,i)=>(
-            <div key={i} style={{display:'flex',gap:8,marginBottom:6,alignItems:'center',flexWrap:'wrap'}}>
-              <span style={{width:24,textAlign:'center',fontWeight:'bold',color:G.gd}}>{i+1}</span>
-              <input value={p.label} onChange={e=>setPrize(i,'label',e.target.value)} placeholder="Prize name"
-                style={{flex:'1 1 150px',padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-              <input type="number" value={p.amount} onChange={e=>setPrize(i,'amount',e.target.value)} placeholder="¥"
-                style={{width:90,padding:'7px 9px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-              <button onClick={()=>delPrize(i)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.rd,borderRadius:6,padding:'6px 10px',cursor:'pointer',fontSize:12}}>✕</button>
-            </div>
-          ))}
-          <button onClick={addPrize} style={{background:G.w,border:`1px dashed ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 12px',cursor:'pointer',fontSize:12,marginBottom:12}}>+ Add prize place</button>
+            <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>PRIZES</div>
+            {form.prizes.map((p,i)=>(
+              <div key={i} style={{display:'flex',gap:8,marginBottom:6,alignItems:'center'}}>
+                <span style={{width:24,textAlign:'center',fontWeight:'bold',color:G.gd,flexShrink:0}}>{i+1}</span>
+                <input value={p.label} onChange={e=>setPrize(i,'label',e.target.value)} placeholder="Prize name" style={{...inBox,flex:'1 1 auto'}}/>
+                <input type="number" value={p.amount} onChange={e=>setPrize(i,'amount',e.target.value)} placeholder="¥" style={{...inBox,width:90,flex:'0 0 90px'}}/>
+                <button onClick={()=>delPrize(i)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.rd,borderRadius:6,padding:'6px 10px',cursor:'pointer',fontSize:12,flexShrink:0}}>✕</button>
+              </div>
+            ))}
+            <button onClick={addPrize} style={{background:G.w,border:`1px dashed ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 12px',cursor:'pointer',fontSize:12,marginBottom:12}}>+ Add prize place</button>
 
-          <div style={{display:'flex',gap:8}}>
-            <Btn onClick={saveComp} disabled={busy}>{busy?'Saving…':'💾 Save'}</Btn>
-            <button onClick={()=>setForm(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+            <div style={{display:'flex',gap:8}}>
+              <Btn onClick={saveComp} disabled={busy}>{busy?'Saving…':'💾 Save'}</Btn>
+              <button onClick={()=>setForm(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
+            </div>
           </div>
         </Overlay>
       )}
 
       {board&&(
-        <Overlay title={`${board.comp.name} — leaderboard`} onClose={()=>setBoard(null)} width={620}>
-          <div style={{fontSize:12,color:G.mut,marginBottom:10}}>
-            {board.comp.kind==='spending'?'Ranked by ¥ spent':'Ranked by qualified referrals'} · {board.comp.starts_on} → {board.comp.ends_on}
-          </div>
-          {board.rows===null
-            ? <div style={{padding:20,textAlign:'center',color:G.mut}}>Loading…</div>
-            : board.rows.length===0
-              ? <div style={{padding:20,textAlign:'center',color:G.mut}}>No qualifying activity in this period yet.</div>
-              : board.rows.map((r,i)=>{
-                  const prize=(board.comp.prizes||[]).find(p=>+p.place===+r.rank);
-                  return(
-                    <div key={r.customer_id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,
-                        padding:'9px 10px',borderRadius:7,marginBottom:5,background:i%2?G.w:G.bg,flexWrap:'wrap'}}>
-                      <div style={{display:'flex',alignItems:'center',gap:9,minWidth:0}}>
-                        <span style={{fontWeight:'bold',color:G.gd,width:22}}>#{r.rank}</span>
-                        <div style={{minWidth:0}}>
-                          <div style={{fontWeight:'bold',fontSize:13,color:G.tx}}>{r.name||'(no name)'}</div>
-                          <div style={{fontSize:11,color:G.mut}}>{r.mobile||'—'}</div>
+        <Overlay title={`${board.comp.name} — leaderboard`} onClose={()=>setBoard(null)} width={640}>
+          <div style={{textAlign:'left'}}>
+            <div style={{fontSize:12,color:G.mut,marginBottom:10}}>
+              Ranked by <b style={{color:G.tx}}>{rankedLabel(board.comp)}</b> · {board.comp.starts_on} → {board.comp.ends_on}
+            </div>
+            {board.comp.kind==='custom'&&(
+              <div style={{background:G.bg,borderRadius:8,padding:10,marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:'bold',color:G.gd,marginBottom:6}}>SCORES — type each person's {rankedLabel(board.comp)}</div>
+                {(board.edit||[]).length===0&&<div style={{fontSize:12,color:G.mut,marginBottom:6}}>No participants yet — add one below.</div>}
+                {(board.edit||[]).map((r,i)=>(
+                  <div key={r.customer_id} style={{display:'flex',gap:8,alignItems:'center',marginBottom:5}}>
+                    <span style={{flex:1,fontSize:12,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}><b>{r.name||'(no name)'}</b> <span style={{color:G.mut}}>{r.mobile||''}</span></span>
+                    <input type="number" value={r.score} onChange={e=>setBoard(b=>({...b,edit:b.edit.map((x,j)=>j===i?{...x,score:e.target.value}:x)}))} style={{...inBox,width:90,flex:'0 0 90px'}}/>
+                    <button onClick={()=>setBoard(b=>({...b,edit:b.edit.filter((_,j)=>j!==i)}))} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.rd,borderRadius:6,padding:'5px 9px',cursor:'pointer',fontSize:11}}>✕</button>
+                  </div>
+                ))}
+                <div style={{marginTop:8}}>
+                  <div style={{fontSize:11,color:G.mut,marginBottom:4}}>Add a participant</div>
+                  <CustomerPicker customers={customers} exclude={(board.edit||[]).map(r=>r.customer_id)}
+                    onPick={c=>setBoard(b=>({...b,edit:[...(b.edit||[]),{customer_id:c.id,name:c.full_name||c.email||'',mobile:c.mobile||'',score:0}]}))}/>
+                </div>
+                <div style={{marginTop:8}}><Btn sm onClick={saveScores} disabled={busy}>{busy?'Saving…':'💾 Save Scores'}</Btn></div>
+              </div>
+            )}
+            {board.rows===null
+              ? <div style={{padding:20,textAlign:'center',color:G.mut}}>Loading…</div>
+              : board.rows.length===0
+                ? <div style={{padding:20,textAlign:'center',color:G.mut}}>{board.comp.kind==='custom'?'Save some scores to see the ranking.':'No qualifying activity in this period yet.'}</div>
+                : board.rows.map((r,i)=>{
+                    const prize=(board.comp.prizes||[]).find(p=>+p.place===+r.rank);
+                    return(
+                      <div key={r.customer_id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,
+                          padding:'9px 10px',borderRadius:7,marginBottom:5,background:i%2?G.w:G.bg,flexWrap:'wrap'}}>
+                        <div style={{display:'flex',alignItems:'center',gap:9,minWidth:0}}>
+                          <span style={{fontWeight:'bold',color:G.gd,width:26}}>#{r.rank}</span>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontWeight:'bold',fontSize:13,color:G.tx}}>{r.name||'(no name)'}</div>
+                            <div style={{fontSize:11,color:G.mut}}>{r.mobile||'—'}</div>
+                          </div>
+                        </div>
+                        <div style={{display:'flex',alignItems:'center',gap:8}}>
+                          <span style={{fontWeight:'bold',color:G.bd,fontSize:14}}>{fmtScore(board.comp,r.score)}</span>
+                          {prize&&(
+                            <Btn sm onClick={()=>setCform({customer:{id:r.customer_id,full_name:r.name,mobile:r.mobile},lockCustomer:true,audience:'one',
+                              kind:'fixed',value:prize.amount,max_uses:1,note:`${prize.label} — ${board.comp.name}`})}>🎁 {prize.label}</Btn>
+                          )}
                         </div>
                       </div>
-                      <div style={{display:'flex',alignItems:'center',gap:8}}>
-                        <span style={{fontWeight:'bold',color:G.bd,fontSize:14}}>
-                          {board.comp.kind==='spending'?`¥${(+r.score).toFixed(2)}`:`${+r.score} refs`}
-                        </span>
-                        {prize&&(
-                          <Btn sm onClick={()=>setCform({code:randCode(),kind:'fixed',value:prize.amount,min_order:0,
-                            customer_id:r.customer_id,max_uses:1,starts_on:'',expires_on:'',
-                            note:`${prize.label} — ${board.comp.name}`})}>🎁 {prize.label}</Btn>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-          {board.err&&<div style={{color:G.rd,fontSize:12,marginTop:8}}>{board.err}</div>}
+                    );
+                  })}
+            {board.err&&<div style={{color:G.rd,fontSize:12,marginTop:8}}>{board.err}</div>}
+          </div>
         </Overlay>
       )}
 
-      {cform&&(
-        <Overlay title="Issue coupon" onClose={()=>setCform(null)} width={520}>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:10,marginBottom:12}}>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Code</div>
-              <input value={cform.code} onChange={e=>setCform(f=>({...f,code:e.target.value.toUpperCase()}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13,fontWeight:'bold',letterSpacing:1}}/>
-            </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Type</div>
-              <select value={cform.kind} onChange={e=>setCform(f=>({...f,kind:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}>
-                <option value="fixed">¥ off</option><option value="percent">% off</option>
-              </select>
-            </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Value</div>
-              <input type="number" value={cform.value} onChange={e=>setCform(f=>({...f,value:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-            </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Minimum order ¥</div>
-              <input type="number" value={cform.min_order} onChange={e=>setCform(f=>({...f,min_order:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-            </div>
-            <div>
-              <div style={{fontSize:11,color:G.mut,marginBottom:3}}>Expires on</div>
-              <input type="date" value={cform.expires_on} onChange={e=>setCform(f=>({...f,expires_on:e.target.value}))}
-                style={{width:'100%',padding:'8px 10px',borderRadius:6,border:`1px solid ${G.brd}`,fontSize:13}}/>
-            </div>
-          </div>
-          <div style={{fontSize:11,color:G.mut,marginBottom:10}}>
-            {cform.customer_id?'This coupon is locked to the selected customer.':'Not tied to a customer — anyone with the code can use it.'}
-          </div>
-          <div style={{display:'flex',gap:8}}>
-            <Btn onClick={issueCoupon} disabled={busy}>{busy?'Creating…':'🎁 Create Coupon'}</Btn>
-            <button onClick={()=>setCform(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'6px 14px',cursor:'pointer',fontSize:12}}>Cancel</button>
-          </div>
-        </Overlay>
-      )}
+      {cform&&<CouponForm initial={cform} onClose={()=>setCform(null)} onSaved={()=>{ if(onCouponsChanged) onCouponsChanged(); else loadAll(); }}/>}
 
       {comps.length===0
-        ? <Card style={{marginBottom:16}}><div style={{textAlign:'center',padding:34,color:G.mut}}>No competitions yet. Create one to start a referral race or a spending contest.</div></Card>
+        ? <Card style={{marginBottom:16}}><div style={{textAlign:'center',padding:34,color:G.mut}}>No competitions yet. Create one to start a referral race, a spending contest, or your own custom contest.</div></Card>
         : comps.map(c=>{
             const s=stC[c.status]||stC.draft;
             return(
               <Card key={c.id} style={{marginBottom:10}}>
                 <div style={{display:'flex',justifyContent:'space-between',gap:10,flexWrap:'wrap',alignItems:'flex-start'}}>
-                  <div>
+                  <div style={{textAlign:'left'}}>
                     <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
                       <span style={{fontWeight:'bold',fontSize:15,color:G.gd}}>{c.name}</span>
                       <span style={{background:s.bg,color:s.c,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>{c.status}</span>
                       <span style={{background:G.bl,color:G.bd,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>
-                        {c.kind==='spending'?'💰 Spending':'👥 Referrals'}
+                        {c.kind==='spending'?'💰':c.kind==='referral'?'👥':'✏️'} {rankedLabel(c)}
                       </span>
                     </div>
                     <div style={{fontSize:11,color:G.mut,marginTop:4}}>{c.starts_on} → {c.ends_on}</div>
@@ -2536,7 +2916,7 @@ function CompTab() {
                   </div>
                   <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
                     <Btn sm onClick={()=>openBoard(c)}>🏆 Leaderboard</Btn>
-                    <Btn v='info' sm onClick={()=>setForm({...c,prizes:c.prizes&&c.prizes.length?c.prizes:[{place:1,label:'1st Prize',amount:50}]})}>✏️ Edit</Btn>
+                    <Btn v='info' sm onClick={()=>setForm({...c,ranked_label:c.ranked_label||'',prizes:c.prizes&&c.prizes.length?c.prizes:[{place:1,label:'1st Prize',amount:50}]})}>✏️ Edit</Btn>
                     <Btn v='danger' sm onClick={()=>delComp(c)}>Delete</Btn>
                   </div>
                 </div>
@@ -2544,29 +2924,33 @@ function CompTab() {
             );
           })}
 
-      <h2 style={{margin:'22px 0 12px',fontSize:19,color:G.gd}}>🎁 Coupons</h2>
-      <div style={{marginBottom:10}}>
-        <Btn v='info' onClick={()=>setCform({code:randCode(),kind:'fixed',value:'',min_order:0,customer_id:'',max_uses:1,starts_on:'',expires_on:'',note:''})}>+ New Coupon</Btn>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',margin:'22px 0 12px'}}>
+        <h2 style={{margin:0,fontSize:19,color:G.gd}}>🎁 Coupons</h2>
+        <Btn v='info' onClick={()=>setCform({audience:'all'})}>+ New Coupon</Btn>
       </div>
-      {coupons.length===0
-        ? <Card><div style={{textAlign:'center',padding:30,color:G.mut}}>No coupons yet.</div></Card>
-        : coupons.map(cp=>(
+      {coupons.length>0&&(
+        <input value={cq} onChange={e=>setCq(e.target.value)} placeholder="Search code, customer or note…"
+          style={{...inBox,marginBottom:10,padding:'9px 12px'}}/>
+      )}
+      {couponsShown.length===0
+        ? <Card><div style={{textAlign:'center',padding:30,color:G.mut}}>{coupons.length?'No coupons match this search.':'No coupons yet.'}</div></Card>
+        : couponsShown.map(cp=>(
             <Card key={cp.id} style={{marginBottom:8}}>
               <div style={{display:'flex',justifyContent:'space-between',gap:10,flexWrap:'wrap',alignItems:'center'}}>
-                <div>
+                <div style={{textAlign:'left',minWidth:0}}>
                   <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
                     <span style={{fontWeight:'bold',fontSize:14,color:G.gd,letterSpacing:1}}>{cp.code}</span>
                     <span style={{background:cp.active?G.gl:G.bg,color:cp.active?G.gd:G.mut,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>
                       {cp.active?'Active':'Disabled'}
                     </span>
+                    <span style={{background:cp.customer_id?G.pl:G.bl,color:cp.customer_id?G.pd:G.bd,borderRadius:9,padding:'2px 9px',fontSize:10,fontWeight:'bold'}}>
+                      {cp.customer_id?`👤 ${cp.customer_name||cp.customer_email||'One customer'}`:'👥 All customers'}
+                    </span>
                   </div>
-                  <div style={{fontSize:12,color:G.tx,marginTop:3}}>
-                    {cp.kind==='percent'?`${cp.value}% off`:`¥${cp.value} off`}
-                    {+cp.min_order>0?` · min ¥${cp.min_order}`:''}
-                    {cp.expires_on?` · expires ${cp.expires_on}`:''}
-                    {` · used ${cp.used_count||0}/${cp.max_uses||1}`}
-                  </div>
-                  {cp.note&&<div style={{fontSize:11,color:G.mut,marginTop:2}}>{cp.note}</div>}
+                  <div style={{fontSize:12,color:G.tx,marginTop:3}}>{couponLine(cp)}</div>
+                  {cp.customer_id&&cp.customer_email&&<div style={{fontSize:11,color:G.mut,marginTop:2}}>✉️ {cp.customer_email}</div>}
+                  {cp.note&&<div style={{fontSize:11,color:G.mut,marginTop:2}}>📝 {cp.note}</div>}
+                  {cp.created_at&&<div style={{fontSize:10,color:G.mut,marginTop:2}}>Issued {String(cp.created_at).slice(0,10)}</div>}
                 </div>
                 <Btn v={cp.active?'danger':'info'} sm onClick={()=>toggleCoupon(cp)}>{cp.active?'Disable':'Enable'}</Btn>
               </div>
@@ -2684,9 +3068,15 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
   const [visitedTabs,setVisitedTabs]=useState(()=>new Set([loadAdminTab()]));
   useEffect(()=>{ setVisitedTabs(p=> p.has(tab)?p:new Set(p).add(tab)); },[tab]);
   const [open,setOpen]=useState(true);
+  // Customers and Competitions both show coupons and stay mounted; bumping this
+  // makes both reload after a coupon is issued from either one.
+  const [couponVer,setCouponVer]=useState(0);
+  const bumpCoupons=useCallback(()=>setCouponVer(v=>v+1),[]);
+  // Orders waiting on you (not yet completed or cancelled) — shown as a badge.
+  const activeOrders=(orders||[]).filter(o=>o.status!=='completed'&&o.status!=='cancelled').length;
   const tabs=[
     {id:'dash',icon:'📊',l:'Dashboard'},{id:'prods',icon:'📋',l:'Product List'},{id:'inv',icon:'🏭',l:'Inventory'},
-    {id:'pi',icon:'🧾',l:'Purchase Invoice'},{id:'pl',icon:'📜',l:'Purchase List'},{id:'oo',icon:'🛒',l:'Online Orders'},
+    {id:'pi',icon:'🧾',l:'Purchase Invoice'},{id:'pl',icon:'📜',l:'Purchase List'},{id:'oo',icon:'🛒',l:'Online Orders',badge:activeOrders},
     {id:'si',icon:'💰',l:'Sales Invoice'},{id:'sl',icon:'📈',l:'Sales List'},
     {id:'cust',icon:'👥',l:'Customers'},{id:'comp',icon:'🏆',l:'Competitions'},
   ];
@@ -2704,7 +3094,12 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
           <button onClick={()=>setOpen(o=>!o)} style={{background:'rgba(255,255,255,0.08)',border:'none',color:G.gold,padding:'13px 0',cursor:'pointer',fontSize:17,width:'100%',textAlign:'center'}}>{open?'◀ ☰':'☰'}</button>
           {tabs.map(tb=>(
             <button key={tb.id} onClick={()=>setTab(tb.id)} title={tb.l} style={{display:'flex',alignItems:'center',gap:11,padding:open?'12px 16px':'12px 0',justifyContent:open?'flex-start':'center',border:'none',background:tab===tb.id?'rgba(255,255,255,0.14)':'transparent',borderLeft:tab===tb.id?`4px solid ${G.gold}`:'4px solid transparent',color:G.w,cursor:'pointer',fontSize:13,fontWeight:tab===tb.id?'bold':'normal',width:'100%',boxSizing:'border-box'}}>
-              <span style={{fontSize:17,flexShrink:0}}>{tb.icon}</span>{open&&<span style={{whiteSpace:'nowrap'}}>{tb.l}</span>}
+              <span style={{fontSize:17,flexShrink:0,position:'relative'}}>
+                {tb.icon}
+                {!open&&tb.badge>0&&<span style={{position:'absolute',top:-6,right:-9,minWidth:16,height:16,borderRadius:8,background:'#E53935',color:G.w,fontSize:9,fontWeight:'bold',display:'flex',alignItems:'center',justifyContent:'center',padding:'0 3px',boxSizing:'border-box'}}>{tb.badge}</span>}
+              </span>
+              {open&&<span style={{whiteSpace:'nowrap',flex:1,textAlign:'left'}}>{tb.l}</span>}
+              {open&&tb.badge>0&&<span title={`${tb.badge} order(s) waiting`} style={{minWidth:20,height:20,borderRadius:10,background:'#E53935',color:G.w,fontSize:11,fontWeight:'bold',display:'inline-flex',alignItems:'center',justifyContent:'center',padding:'0 6px',boxSizing:'border-box'}}>{tb.badge}</span>}
             </button>
           ))}
         </div>
@@ -2714,7 +3109,7 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
              a Sales Invoice being built). Each tab is now mounted once, the
              first time it's opened, and just hidden (not unmounted) after
              that, so its state survives switching away and back. */}
-         {visitedTabs.has('dash')&&<div style={{display:tab==='dash'?'block':'none'}}><TabErrorBoundary key="dash"><DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes}/></TabErrorBoundary></div>}
+         {visitedTabs.has('dash')&&<div style={{display:tab==='dash'?'block':'none'}}><TabErrorBoundary key="dash"><DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes} goTab={setTab}/></TabErrorBoundary></div>}
          {visitedTabs.has('prods')&&<div style={{display:tab==='prods'?'block':'none'}}><TabErrorBoundary key="prods"><ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/></TabErrorBoundary></div>}
          {visitedTabs.has('inv')&&<div style={{display:tab==='inv'?'block':'none'}}><TabErrorBoundary key="inv"><InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/></TabErrorBoundary></div>}
          {visitedTabs.has('pi')&&<div style={{display:tab==='pi'?'block':'none'}}><TabErrorBoundary key="pi"><PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/></TabErrorBoundary></div>}
@@ -2722,8 +3117,8 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
          {visitedTabs.has('oo')&&<div style={{display:tab==='oo'?'block':'none'}}><TabErrorBoundary key="oo"><OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/></TabErrorBoundary></div>}
          {visitedTabs.has('si')&&<div style={{display:tab==='si'?'block':'none'}}><TabErrorBoundary key="si"><SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/></TabErrorBoundary></div>}
          {visitedTabs.has('sl')&&<div style={{display:tab==='sl'?'block':'none'}}><TabErrorBoundary key="sl"><SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/></TabErrorBoundary></div>}
-         {visitedTabs.has('cust')&&<div style={{display:tab==='cust'?'block':'none'}}><TabErrorBoundary key="cust"><CustTab/></TabErrorBoundary></div>}
-         {visitedTabs.has('comp')&&<div style={{display:tab==='comp'?'block':'none'}}><TabErrorBoundary key="comp"><CompTab/></TabErrorBoundary></div>}
+         {visitedTabs.has('cust')&&<div style={{display:tab==='cust'?'block':'none'}}><TabErrorBoundary key="cust"><CustTab couponVer={couponVer} onCouponsChanged={bumpCoupons}/></TabErrorBoundary></div>}
+         {visitedTabs.has('comp')&&<div style={{display:tab==='comp'?'block':'none'}}><TabErrorBoundary key="comp"><CompTab couponVer={couponVer} onCouponsChanged={bumpCoupons}/></TabErrorBoundary></div>}
         </div>
 
       </div>
