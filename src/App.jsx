@@ -20,6 +20,14 @@ const GLOBAL_CSS = `
   }
   select option { color: #1E241F; background-color: #FFFFFF; }
   input::placeholder, textarea::placeholder { color: #8E948F; }
+  /* Points card: the star turns like a coin and pulses with a warm glow. */
+  @keyframes todStarSpin { 0% { transform: perspective(240px) rotateY(0deg); } 100% { transform: perspective(240px) rotateY(360deg); } }
+  @keyframes todStarGlow { 0%,100% { filter: drop-shadow(0 0 2px rgba(255,214,79,0.55)); } 50% { filter: drop-shadow(0 0 11px rgba(255,214,79,1)); } }
+  @keyframes todBarShine { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
+  @keyframes todSheetUp { from { transform: translateY(40px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  .tod-star { display:inline-block; animation: todStarSpin 3.6s linear infinite, todStarGlow 1.8s ease-in-out infinite; transform-origin: 50% 50%; }
+  .tod-bar-shine { position:absolute; top:0; bottom:0; width:40%; background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent); animation: todBarShine 2.6s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .tod-star, .tod-bar-shine { animation: none; } }
 `;
 function useGlobalCss(){
   useEffect(()=>{
@@ -130,15 +138,16 @@ export function openPrintWindow(html){
   w.document.write(html); w.document.close(); w.focus();
   setTimeout(()=>{try{w.print();}catch(e){}},350);
 }
-export function buildPOHTML({poNum,date,time,vendor,hdr,items,totQty,totC,totS,bdLC,chnLC,grand}){
-  const rows=items.map(i=>`<tr><td>${i.name}</td><td style="text-align:center">${i.qty}</td><td style="text-align:center">${i.pw||''}</td><td style="text-align:right">${i.uc||0}</td><td style="text-align:right">${i.tc||0}</td><td style="text-align:right">${i.ts2||0}</td><td style="text-align:center">${i.exp||''}</td></tr>`).join('');
+export function buildPOHTML({poNum,date,time,vendor,hdr,items,totQty,totC,totS,bdLC,chnLC,grand,totGW,agw}){
+  const gwTotal = totGW!=null ? totGW : items.reduce((s,i)=>s+(+i.gw||0)*(+i.qty||0),0);
+  const rows=items.map(i=>`<tr><td>${i.name}</td><td style="text-align:center">${i.qty}</td><td style="text-align:center">${i.pw||''}</td><td style="text-align:center">${i.gw||''}</td><td style="text-align:right">${i.uc||0}</td><td style="text-align:right">${i.tc||0}</td><td style="text-align:right">${i.ts2||0}</td><td style="text-align:center">${i.exp||''}</td><td style="text-align:right">${i.ppc?'¥'+i.ppc:'-'}</td></tr>`).join('');
   return `<html><head><title>Purchase Order ${poNum}</title><style>
     body{font-family:Arial,sans-serif;padding:24px;color:#222}
     h2{color:#15532D;margin:0 0 2px}
     table{width:100%;border-collapse:collapse;margin-top:12px}
     th,td{padding:6px 8px;border-bottom:1px solid #ddd;font-size:12px}
     th{text-align:left;background:#E8F5E9}
-    .tot{margin-top:14px;width:280px;margin-left:auto;font-size:13px}
+    .tot{margin-top:14px;width:300px;margin-left:auto;font-size:13px}
     .tot div{display:flex;justify-content:space-between;padding:3px 0}
     .grand{font-weight:bold;font-size:16px;border-top:2px solid #333;color:#15532D}
   </style></head><body>
@@ -146,19 +155,24 @@ export function buildPOHTML({poNum,date,time,vendor,hdr,items,totQty,totC,totS,b
     <div>Date: ${date} &nbsp; Time: ${time}</div>
     <div>Vendor: ${vendor||'-'}</div>
     <div>Costing RMB Rate: ${hdr.cr||'-'} &nbsp; Selling RMB Rate: ${hdr.sr||'-'}</div>
-    <table><thead><tr><th>Product</th><th>Qty</th><th>Packed(g)</th><th>Unit Cost(BDT)</th><th>Total Cost(BDT)</th><th>Total Ship(BDT)</th><th>Expiry</th></tr></thead><tbody>${rows}</tbody></table>
+    <table><thead><tr><th>Product</th><th>Qty</th><th>Packed(g)</th><th>Gross(KG)</th><th>Unit Cost(BDT)</th><th>Total Cost(BDT)</th><th>Total Ship(BDT)</th><th>Expiry</th><th>Per Pkt(RMB)</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="tot">
       <div><span>Total Qty</span><span>${totQty} PCS</span></div>
+      <div><span>Total Gross Weight</span><span>${gwTotal.toFixed(3)} kg</span></div>
+      ${agw!=null&&agw!==''?`<div><span>Actual Gross Weight</span><span>${(+agw).toFixed(3)} kg</span></div>`:''}
       <div><span>Total Cost</span><span>৳${totC.toFixed(2)}</span></div>
       <div><span>Total Shipping</span><span>৳${totS.toFixed(2)}</span></div>
       <div><span>BD Local Courier</span><span>৳${bdLC.toFixed(2)}</span></div>
       <div><span>China Local Courier</span><span>৳${chnLC.toFixed(2)}</span></div>
       <div class="grand"><span>Grand Total</span><span>৳${grand.toFixed(2)}</span></div>
     </div>
+    <div style="margin-top:10px;font-size:11px;color:#666">Per Pkt (RMB) includes each pack's share of the BD and China courier, split by gross weight.</div>
   </body></html>`;
 }
 export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour,grand,hasDsc,qr}){
-  const rows=items.map(i=>`<tr><td>${i.name}</td><td style="text-align:center">${i.qty}</td><td style="text-align:right">¥${(+i.up).toFixed(2)}</td><td style="text-align:right">¥${(+i.tp).toFixed(2)}</td></tr>`).join('');
+  // Pack size per line (customers asked which size they were getting — e.g.
+  // Black Tea 100g vs 200g share a name).
+  const rows=items.map(i=>`<tr><td>${i.name}</td><td class="center">${+i.pw>0?`${+i.pw}g`:'-'}</td><td style="text-align:center">${i.qty}</td><td style="text-align:right">¥${(+i.up).toFixed(2)}</td><td style="text-align:right">¥${(+i.tp).toFixed(2)}</td></tr>`).join('');
   // Payment QR codes (Alipay / WeChat) as uploaded in the admin dashboard. cdnImage()
   // is in scope here, so stored Supabase URLs are rewritten to the fast-from-China CDN.
   const qrCells=[];
@@ -181,7 +195,7 @@ export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour
     <div style="margin-top:10px">Order #: <b>${orderNo}</b></div>
     <div>Customer: ${cname||'-'} &nbsp; Mobile: ${mob||'-'}</div>
     <div>Address: ${addr||'-'}</div>
-    <table><thead><tr><th>Product</th><th class="center">Qty</th><th>Unit Price</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
+    <table><thead><tr><th>Product</th><th class="center">Pack</th><th class="center">Qty</th><th>Unit Price</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="tot">
       <div><span>Subtotal</span><span>¥${sub.toFixed(2)}</span></div>
       ${hasDsc?`<div><span>Price After Discount</span><span>¥${pad.toFixed(2)}</span></div>`:''}
@@ -1360,11 +1374,133 @@ function AuthScreen({onLogin,t}) {
   );
 }
 
+// ---------- Membership: points card + level ladder ----------
+const TIER_STYLE={
+  Bronze:{bg:'#F6E7D8',fg:'#8D5524',ring:'#C58B5A',icon:'🥉'},
+  Silver:{bg:'#ECEFF1',fg:'#546E7A',ring:'#B0BEC5',icon:'🥈'},
+  Gold:{bg:'#FFF4CC',fg:'#8a6d00',ring:'#F9A825',icon:'🥇'},
+  Platinum:{bg:'#ECE8F7',fg:'#4A3A8C',ring:'#9F8FE0',icon:'💎'},
+};
+// The ladder, built from the admin's live settings (Query-33). Platinum only
+// appears once it has a threshold, so older settings still render cleanly.
+function tierLadder(rw){
+  const L=[{name:'Bronze',at:0,mult:+rw.bronze_mult||1},
+           {name:'Silver',at:+rw.silver_at||0,mult:+rw.silver_mult||1},
+           {name:'Gold',at:+rw.gold_at||0,mult:+rw.gold_mult||1}];
+  if(+rw.platinum_at>0) L.push({name:'Platinum',at:+rw.platinum_at,mult:+rw.platinum_mult||1});
+  return L;
+}
+function tierProgress(rw){
+  const L=tierLadder(rw);
+  const spend=+rw.lifetime_spend||0;
+  let idx=L.findIndex(x=>x.name===rw.tier); if(idx<0) idx=0;
+  const cur=L[idx], next=L[idx+1]||null;
+  const pct=next?Math.max(0,Math.min(1,(spend-cur.at)/Math.max(1,next.at-cur.at))):1;
+  return {L,idx,cur,next,spend,pct,toGo:next?Math.max(0,next.at-spend):0};
+}
+function GlowStar({size=30}){
+  return(
+    <span className="tod-star" style={{width:size,height:size,lineHeight:0}} aria-hidden="true">
+      <svg width={size} height={size} viewBox="0 0 24 24">
+        <defs>
+          <linearGradient id="todStarG" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor="#FFF3B0"/><stop offset="0.45" stopColor="#FFD54F"/><stop offset="1" stopColor="#F9A825"/>
+          </linearGradient>
+        </defs>
+        <path d="M12 1.8l3.1 6.3 6.9 1-5 4.9 1.2 6.9L12 17.6 5.8 20.9 7 14l-5-4.9 6.9-1z" fill="url(#todStarG)" stroke="#E6A100" strokeWidth="0.7" strokeLinejoin="round"/>
+      </svg>
+    </span>
+  );
+}
+function PointsCard({rw,onOpen}){
+  const {cur,next,spend,pct,toGo}=tierProgress(rw);
+  const ts=TIER_STYLE[cur.name]||TIER_STYLE.Bronze;
+  const [w,setW]=useState(0);
+  useEffect(()=>{ const id=setTimeout(()=>setW(pct),80); return ()=>clearTimeout(id); },[pct]);
+  return(
+    <div onClick={onOpen} role="button" style={{cursor:'pointer',marginBottom:12,borderRadius:14,padding:'15px 16px',background:'linear-gradient(135deg,#0d522c,#1a7346)',boxShadow:'0 4px 14px rgba(13,82,44,0.25)'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10}}>
+        <div>
+          <div style={{color:'rgba(255,255,255,0.75)',fontSize:10,fontWeight:'bold',letterSpacing:1}}>MY POINTS</div>
+          <div style={{display:'flex',alignItems:'center',gap:9,marginTop:3}}>
+            <GlowStar size={30}/>
+            <span style={{color:G.gold,fontWeight:'bold',fontSize:26,lineHeight:1}}>{rw.points}</span>
+          </div>
+          {rw.point_value>0&&<div style={{color:'rgba(255,255,255,0.8)',fontSize:11,marginTop:4}}>≈ ¥{(rw.points*rw.point_value).toFixed(2)} off</div>}
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{display:'inline-block',background:ts.bg,color:ts.fg,borderRadius:12,padding:'5px 12px',fontSize:12,fontWeight:'bold',boxShadow:`0 0 0 2px ${ts.ring}`}}>{ts.icon} {cur.name} Member</div>
+          <div style={{color:'rgba(255,255,255,0.75)',fontSize:10,marginTop:6}}>Tap to see all levels ›</div>
+        </div>
+      </div>
+      <div style={{marginTop:13}}>
+        <div style={{position:'relative',height:10,borderRadius:6,background:'rgba(255,255,255,0.18)',overflow:'hidden'}}>
+          <div style={{position:'absolute',left:0,top:0,bottom:0,width:`${Math.round(w*100)}%`,borderRadius:6,background:'linear-gradient(90deg,#FFD54F,#F9A825)',transition:'width 1.2s cubic-bezier(.2,.8,.2,1)',overflow:'hidden'}}>
+            <span className="tod-bar-shine"/>
+          </div>
+        </div>
+        <div style={{display:'flex',justifyContent:'space-between',marginTop:6,fontSize:10,color:'rgba(255,255,255,0.85)'}}>
+          <span>{cur.name} · ¥{Math.round(spend)} spent</span>
+          <span>{next?<>¥{Math.ceil(toGo)} more to <b style={{color:G.gold}}>{next.name}</b></>:<b style={{color:G.gold}}>Top level reached 🎉</b>}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+function TierSheet({rw,onClose}){
+  const {L,idx,spend}=tierProgress(rw);
+  const perks=rw.tier_perks||{};
+  const ppy=+rw.points_per_yuan||0, pv=+rw.point_value||0;
+  return(
+    <div onClick={onClose} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',zIndex:600,display:'flex',flexDirection:'column',justifyContent:'flex-end'}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:G.w,borderRadius:'22px 22px 0 0',maxHeight:'88vh',overflow:'auto',padding:'0 18px 26px',animation:'todSheetUp .28s ease-out',textAlign:'left'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'15px 0',borderBottom:`1px solid ${G.brd}`,marginBottom:14}}>
+          <div style={{fontWeight:'bold',fontSize:17,color:G.dk}}>🏅 Membership levels</div>
+          <button onClick={onClose} style={{background:'none',border:'none',fontSize:22,cursor:'pointer',color:G.mut}}>✕</button>
+        </div>
+        <div style={{fontSize:12,color:G.tx,marginBottom:14,lineHeight:1.6}}>
+          Your level goes up with your total spending on completed orders (¥{Math.round(spend)} so far). Higher levels earn points faster
+          {pv>0?<> — every point is worth ¥{pv} off a future order</>:null}.
+        </div>
+        {L.map((t,i)=>{
+          const ts=TIER_STYLE[t.name]||TIER_STYLE.Bronze;
+          const reached=i<=idx, current=i===idx;
+          const pctBack=ppy*t.mult*pv*100;
+          return(
+            <div key={t.name} style={{display:'flex',gap:12}}>
+              <div style={{display:'flex',flexDirection:'column',alignItems:'center',width:34,flexShrink:0}}>
+                <div style={{width:34,height:34,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,
+                  background:reached?ts.bg:G.bg,border:`2px solid ${reached?ts.ring:G.brd}`,boxShadow:current?`0 0 0 4px ${ts.bg}`:'none'}}>{reached?ts.icon:'🔒'}</div>
+                {i<L.length-1&&<div style={{flex:1,width:3,minHeight:22,background:i<idx?ts.ring:G.brd,borderRadius:2}}/>}
+              </div>
+              <div style={{flex:1,paddingBottom:16,minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                  <span style={{fontWeight:'bold',fontSize:14,color:reached?ts.fg:G.mut}}>{t.name}</span>
+                  {current&&<span style={{background:G.gm,color:G.w,borderRadius:9,padding:'1px 8px',fontSize:10,fontWeight:'bold'}}>YOU ARE HERE</span>}
+                  {!reached&&<span style={{fontSize:11,color:G.mut}}>¥{Math.ceil(Math.max(0,t.at-spend))} to go</span>}
+                </div>
+                <div style={{fontSize:11,color:G.mut,marginTop:2}}>{t.at>0?`From ¥${t.at} total spend`:'Every member starts here'}</div>
+                <div style={{background:reached?ts.bg:G.bg,borderRadius:9,padding:'8px 10px',marginTop:6,fontSize:12,color:G.tx,lineHeight:1.55}}>
+                  ⭐ Earn <b>{+(ppy*t.mult).toFixed(2)} point{ppy*t.mult===1?'':'s'}</b> per ¥1{t.mult!==1?<> (×{t.mult})</>:null}
+                  {pctBack>0&&<span style={{color:G.mut}}> · ≈ {pctBack.toFixed(1)}% back</span>}
+                  {perks[t.name]&&<div style={{marginTop:3}}>🎁 {perks[t.name]}</div>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <button onClick={onClose} style={{width:'100%',background:G.gd,color:G.w,border:'none',borderRadius:12,padding:13,cursor:'pointer',fontSize:14,fontWeight:'bold',marginTop:4}}>Got it</button>
+      </div>
+    </div>
+  );
+}
+
 function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   const [sec,setSec]=useState('main');
   const [openOrd,setOpenOrd]=useState(null);
   const [rw,setRw]=useState(null);      // points/tier/referral summary
   const [qrUrl,setQrUrl]=useState('');  // generated referral QR image
+  const [tierSheet,setTierSheet]=useState(false); // membership ladder sheet
   const [na,setNa] = useState({name:'',mob:'',province:'',city:'',detail:''});
   const stC = {pending:{bg:G.goldl,c:G.yd},processing:{bg:G.bl,c:G.bd},shipped:{bg:G.pl,c:G.pd},completed:{bg:G.gl,c:G.gd}};
   const [addrBusy,setAddrBusy]=useState(false);
@@ -1450,25 +1586,8 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
               </div>
             </div>
           </Card>
-          {rw&&rw.points_enabled&&(
-            <Card style={{marginBottom:12,background:'linear-gradient(135deg,#0d522c,#1a7346)',border:'none'}}>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap'}}>
-                <div>
-                  <div style={{color:'rgba(255,255,255,0.75)',fontSize:10,fontWeight:'bold',letterSpacing:1}}>MY POINTS</div>
-                  <div style={{color:G.gold,fontWeight:'bold',fontSize:24}}>⭐ {rw.points}</div>
-                  {rw.point_value>0&&<div style={{color:'rgba(255,255,255,0.8)',fontSize:11}}>≈ ¥{(rw.points*rw.point_value).toFixed(2)} off</div>}
-                </div>
-                <div style={{textAlign:'right'}}>
-                  <div style={{background:'rgba(255,255,255,0.18)',color:G.w,borderRadius:12,padding:'4px 12px',fontSize:12,fontWeight:'bold'}}>{rw.tier} Member</div>
-                  {rw.tier!=='Gold'&&(
-                    <div style={{color:'rgba(255,255,255,0.75)',fontSize:10,marginTop:5}}>
-                      ¥{Math.max(0,(rw.tier==='Bronze'?rw.silver_at:rw.gold_at)-rw.lifetime_spend).toFixed(0)} more to {rw.tier==='Bronze'?'Silver':'Gold'}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </Card>
-          )}
+          {rw&&rw.points_enabled&&<PointsCard rw={rw} onOpen={()=>setTierSheet(true)}/>}
+          {tierSheet&&rw&&<TierSheet rw={rw} onClose={()=>setTierSheet(false)}/>}
           {rw&&rw.ref_enabled&&(
             <div onClick={()=>setSec('refer')} style={{cursor:'pointer',marginBottom:12,borderRadius:12,padding:'14px 16px',
                 background:'linear-gradient(135deg,#1a7346,#2d9d63)',display:'flex',justifyContent:'space-between',alignItems:'center',gap:10}}>
