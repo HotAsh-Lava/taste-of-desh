@@ -1065,6 +1065,23 @@ function InvTab({inv,setInv,prods,setProds,cats,catColors,delInv,setDelInv,reloa
 // shared out by each line's share of the total gross weight (gross kg × qty) —
 // heavier lines carry more of the courier, exactly as the courier charged it.
 // If no line has a gross weight yet, the pool is shared by quantity instead.
+// Every purchase-order line gets a permanent key, stored with the batch it
+// becomes in Inventory, so later edits to that line (Set Price, costs) can find
+// and update the right batch even if other lines are added or removed.
+const newLineKey=()=>`ln_${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
+// Older lines saved before keys existed get a key from their position ("L0",
+// "L1"…). It's deterministic, so every screen works out the same key for the
+// same line, and it's saved with the PO the first time the PO is written.
+const withLineKeys=(items)=>(items||[]).map((it,i)=>it.key?it:{...it,key:`L${i}`});
+// Push a moved line's Set Price + landed cost onto its Inventory batch(es) (Query-34).
+async function syncMovedLine(poId,it){
+  const { data, error }=await supabase.rpc('admin_sync_po_line',{
+    p_po_id:poId, p_line:it.key, p_name:it.name, p_pw:+it.pw||0, p_exp:it.exp||null,
+    p_sp:(+it.sp>0?+it.sp:null), p_cp:(+it.ppc>0?+it.ppc:null),
+  });
+  if(error) throw new Error(error.message);
+  return data||0;
+}
 function piCosts(items,hdr){
   const cr=+hdr.cr||0;
   const bdcRmb=cr>0?(+hdr.bdc||0)/cr:0;
@@ -1087,8 +1104,8 @@ function piCosts(items,hdr){
   return {rows,pool,bdcRmb,cncRmb,totW,totQ};
 }
 
-function PITab({prods,pos,setPOs,catColors}) {
-  function blankPIItem(){return {pid:null,name:'',qty:'',pw:'',uc:'',cat:'',gw:'',us:'',exp:'',sp:'',upc:'',tc:'',ts2:'',ppc:''};}
+function PITab({prods,pos,setPOs,catColors,reloadInventory}) {
+  function blankPIItem(){return {key:newLineKey(),pid:null,name:'',qty:'',pw:'',uc:'',cat:'',gw:'',us:'',exp:'',sp:'',upc:'',tc:'',ts2:'',ppc:''};}
   const blankHdr={cr:'',sr:'',bdc:'',cnc:'',agw:''};
   const [hdr,setHdr]=useState(blankHdr);
   const [vendor,setVendor]=useState('');
@@ -1127,13 +1144,26 @@ function PITab({prods,pos,setPOs,catColors}) {
   const unpicked=rows.filter(i=>i.name&&!i.pid&&!(prods||[]).some(p=>p.name===i.name.trim()));
 
   async function save(){
-    const fi=rows.filter(i=>i.name&&i.qty);if(!fi.length){alert('Add at least one product');return;}
+    const fi=withLineKeys(rows.filter(i=>i.name&&i.qty));if(!fi.length){alert('Add at least one product');return;}
     const existing = curId ? pos.find(p=>p.id===curId) : null;
     const draft={poNum,date:existing?existing.date:bjDate(),time:existing?existing.time:bjTime(),vendor,hdr:{...hdr},items:fi,totQty,totC,totS,bdLC:+hdr.bdc||0,chnLC,grand};
     if(curId){
       const { error } = await supabase.from('purchase_orders').update(toDbPO(draft)).eq('id',curId);
       if(error){alert('Failed to save purchase order: '+error.message);return;}
       setPOs(p=>p.map(x=>x.id===curId?{...draft,id:curId}:x));
+      // Lines already moved to Inventory: carry the Set Price and landed cost over
+      // to their batches, so Inventory never keeps the old numbers.
+      const moved=fi.filter(i=>i.moved);
+      if(moved.length){
+        let n=0, failed='';
+        for(const it of moved){ try{ n+=await syncMovedLine(curId,it); }catch(e){ failed=e.message; } }
+        if(reloadInventory) await reloadInventory();
+        setItems([...fi, blankPIItem()]);
+        if(failed){ alert('Purchase order saved, but Inventory could not be updated:\n\n'+failed+'\n\nHas Query-34 been run?'); return; }
+        alert(`Purchase order saved! ${n} Inventory batch${n!==1?'es':''} updated with the new prices.`);
+        return;
+      }
+      setItems([...fi, blankPIItem()]);
     } else {
       const { data, error } = await supabase.from('purchase_orders').insert(toDbPO(draft)).select().single();
       if(error){alert('Failed to save purchase order: '+error.message);return;}
@@ -1158,7 +1188,7 @@ function PITab({prods,pos,setPOs,catColors}) {
   }
   function loadPO(po){
     setCurId(po.id); setVendor(po.vendor||''); setHdr({...blankHdr,...(po.hdr||{})});
-    setItems([...(po.items||[]).map(it=>({pid:null,...it})), blankPIItem()]);
+    setItems([...withLineKeys(po.items||[]).map(it=>({pid:null,...it})), blankPIItem()]);
   }
   const box={background:G.w,borderRadius:8,padding:'8px 10px',border:`1px solid ${G.brd}`};
 
@@ -1207,7 +1237,7 @@ function PITab({prods,pos,setPOs,catColors}) {
                 {it.ppc?`¥${it.ppc}`:'—'}
                 {it.ppc&&it.cour&&<div style={{fontSize:9,color:G.mut,fontWeight:'normal'}}>incl. ¥{it.cour} courier</div>}
               </td>
-              <td style={{padding:'5px'}}><input type="number" value={it.sp} onChange={e=>updItem(idx,'sp',e.target.value)} style={{width:60,padding:'4px',borderRadius:4,border:`1px solid ${G.brd}`,fontSize:11}}/></td>
+              <td style={{padding:'5px'}}><input type="number" value={it.sp} onChange={e=>updItem(idx,'sp',e.target.value)} title="Required before this line can be moved to Inventory" placeholder={it.name?'required':''} style={{width:60,padding:'4px',borderRadius:4,border:`1px solid ${it.name&&!(+it.sp>0)?G.rd:G.brd}`,background:it.name&&!(+it.sp>0)?'#FFF5F5':G.w,fontSize:11}}/></td>
               <td style={{padding:'5px',textAlign:'center',fontSize:10}}>{it.upc}</td>
               <td style={{padding:'5px',textAlign:'center'}}>{items.length>1&&<button onClick={()=>setItems(p=>p.filter((_,j)=>j!==idx))} style={{background:'none',border:'none',cursor:'pointer',color:'#B71C1C',fontSize:14}}>✕</button>}</td>
             </tr>
@@ -1256,22 +1286,67 @@ function PITab({prods,pos,setPOs,catColors}) {
   );
 }
 
-function PLTab({pos,setPOs,inv,setInv,prods,catColors}) {
+function PLTab({pos,setPOs,inv,setInv,prods,catColors,reloadInventory}) {
   const [sel,setSel]=useState([]);
   // Each purchase order is collapsed to one line (PO#, vendor, date) until you
   // open it — the full tables made this tab very long.
   const [openPO,setOpenPO]=useState(()=>new Set());
   const togglePO=(id)=>setOpenPO(p=>{const n=new Set(p); n.has(id)?n.delete(id):n.add(id); return n;});
+  // Lines whose missing Set Price blocked a move — outlined in red until filled.
+  const [needSp,setNeedSp]=useState([]);
+  const [savingSp,setSavingSp]=useState('');
+  const spBefore=useRef({});   // value when the field was focused — only save real changes
+
+  // Set Price can be filled in (or corrected) right here, on any line. For a
+  // line that's already in Inventory, the batch it became is updated too.
+  function editSp(poId,idx,v){
+    setPOs(ps=>ps.map(po=>po.id!==poId?po:{...po,items:po.items.map((it,i)=>i===idx?{...it,sp:v}:it)}));
+    if(+v>0) setNeedSp(n=>n.filter(k=>k!==`${poId}_${idx}`));
+  }
+  async function saveSp(poId,idx){
+    const po=pos.find(p=>p.id===poId); if(!po) return;
+    const k=`${poId}_${idx}`;
+    if(String(spBefore.current[k]??'')===String((po.items[idx]||{}).sp??'')) return;
+    spBefore.current[k]=(po.items[idx]||{}).sp;
+    const items=withLineKeys(po.items);
+    setPOs(ps=>ps.map(p=>p.id===poId?{...p,items}:p));
+    const { error }=await supabase.from('purchase_orders').update({items}).eq('id',poId);
+    if(error){ alert('Could not save the Set Price: '+error.message); return; }
+    const it=items[idx];
+    if(it&&it.moved){
+      setSavingSp(`${poId}_${idx}`);
+      try{
+        const costed=piCosts(items,po.hdr||{}).rows[idx];
+        const n=await syncMovedLine(poId,{...it,ppc:costed?costed.ppc:it.ppc});
+        if(reloadInventory) await reloadInventory();
+        if(n===0) alert(`Set Price saved on the purchase order. No matching batch of “${it.name}” is left in Inventory to update (it may have sold out).`);
+      }catch(e){ alert('Set Price saved, but the Inventory batch could not be updated:\n\n'+e.message+'\n\nHas Query-34 been run?'); }
+      finally{ setSavingSp(''); }
+    }
+  }
+
   async function moveToInv(){
     const toMv=[];
+    // Give every line its permanent key ONCE, and use those same keys both on the
+    // new batches and on the saved purchase order, so they always match.
+    const keyedById={};
+    pos.forEach(po=>{ keyedById[po.id]=withLineKeys(po.items||[]); });
     // Per-pack cost is recalculated with the current rule (courier included), so an
     // older PO that hasn't been re-saved still lands in inventory at landed cost.
-    pos.forEach(po=>{ const costed=piCosts(po.items||[],po.hdr||{}).rows; costed.forEach((it,ii)=>{
+    pos.forEach(po=>{ const keyed=keyedById[po.id]; const costed=piCosts(keyed,po.hdr||{}).rows; costed.forEach((it,ii)=>{
       const key=`${po.id}_${ii}`;
-      if(sel.includes(key) && !it.moved) toMv.push({...it,_poId:po.id,_idx:ii});
+      if(sel.includes(key) && !it.moved) toMv.push({...it,_poId:po.id,_idx:ii,_sel:key});
     }); });
     if(!toMv.length){setSel([]);return;}
-    const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||'',_pid:it.pid}));
+    // Set Price is required — a batch without one shows ¥0 in Inventory.
+    const missing=toMv.filter(it=>!(+it.sp>0));
+    if(missing.length){
+      setNeedSp(missing.map(m=>m._sel));
+      setOpenPO(p=>{ const n=new Set(p); missing.forEach(m=>n.add(m._poId)); return n; });
+      alert(`Set Price (RMB) is required before moving to Inventory.\n\nPlease fill it in for:\n• ${[...new Set(missing.map(m=>m.name))].join('\n• ')}`);
+      return;
+    }
+    const draftItems=toMv.map(it=>({date:bjDate(),ts:bjTime(),name:it.name,cat:it.cat||'',qty:+it.qty||0,exp:it.exp||'',sp:+it.sp||0,cp:+it.ppc||0,pw:+it.pw||0,upc:it.upc||'',_pid:it.pid,_poId:it._poId,_key:it.key}));
     // Link each batch to its product. A row picked from the dropdown in Purchase
     // Invoice remembers exactly which product (and so which pack size) it was;
     // older rows fall back to matching name + pack weight + UPC. The database
@@ -1280,17 +1355,19 @@ function PLTab({pos,setPOs,inv,setInv,prods,catColors}) {
       if(d._pid!=null){ const p=(prods||[]).find(x=>x.id===d._pid); if(p&&p.name===d.name) return p.id; }
       return findProductForBatch(prods,d)?.id||null;
     };
-    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>toDbInv(d, pidFor(d)))).select();
-    if(error){alert('Failed to move to inventory: '+error.message);return;}
+    // Each batch also remembers the PO line it came from (Query-34), so a later
+    // Set Price / cost change on that line can update it.
+    const { data, error } = await supabase.from('inventory').insert(draftItems.map(d=>({...toDbInv(d, pidFor(d)), po_id:d._poId, po_line:d._key}))).select();
+    if(error){alert('Failed to move to inventory: '+error.message+(/po_id|po_line/.test(error.message)?'\n\nHas Query-34 been run?':''));return;}
     const news=data.map(fromDbInv);
     setInv(p=>[...p,...news]);
-    const updatedPOs=pos.map(po=>({...po,items:po.items.map((it,ii)=>sel.includes(`${po.id}_${ii}`)?{...it,moved:true}:it)}));
+    const updatedPOs=pos.map(po=>({...po,items:keyedById[po.id].map((it,ii)=>sel.includes(`${po.id}_${ii}`)?{...it,moved:true}:it)}));
     const affectedPOs=updatedPOs.filter(po=>po.items.some((it,ii)=>sel.includes(`${po.id}_${ii}`)));
     await Promise.all(affectedPOs.map(po=>supabase.from('purchase_orders').update({items:po.items}).eq('id',po.id)));
     setPOs(updatedPOs);
     const unlinked=news.filter(n=>n.pid==null).map(n=>n.name);
     alert(`${news.length} items moved to Inventory!`+(unlinked.length?`\n\n⚠️ Not linked to a product (check name / pack weight in Inventory): ${unlinked.join(', ')}`:''));
-    setSel([]);
+    setSel([]); setNeedSp([]);
   }
   return(
     <div>
@@ -1359,7 +1436,17 @@ function PLTab({pos,setPOs,inv,setInv,prods,catColors}) {
                     <td style={{padding:'6px',textAlign:'center'}}>{it.ts2}</td>
                     <td style={{padding:'6px',textAlign:'center',...expStyle(it.exp)}}>{it.exp}</td>
                     <td style={{padding:'6px',textAlign:'center',color:G.gd,fontWeight:'bold'}}>{costed[i]&&costed[i].ppc?`¥${costed[i].ppc}`:'—'}{costed[i]&&costed[i].cour?<div style={{fontSize:9,color:G.mut,fontWeight:'normal'}}>incl. ¥{costed[i].cour} courier</div>:null}</td>
-                    <td style={{padding:'6px',textAlign:'center'}}>{it.sp?`¥${it.sp}`:'—'}</td>
+                    <td style={{padding:'4px 6px',textAlign:'center'}}>
+                      {(()=>{const k=`${po.id}_${i}`;const bad=!(+it.sp>0)&&(needSp.includes(k)||!it.moved);return(
+                        <div style={{display:'flex',alignItems:'center',gap:3,justifyContent:'center'}}>
+                          <span style={{fontSize:10,color:G.mut}}>¥</span>
+                          <input type="number" value={it.sp??''} onFocus={()=>{spBefore.current[k]=it.sp;}} onChange={e=>editSp(po.id,i,e.target.value)} onBlur={()=>saveSp(po.id,i)}
+                            placeholder="required" title={it.moved?'Changing this also updates the batch in Inventory':'Required before moving to Inventory'}
+                            style={{width:58,padding:'3px 5px',borderRadius:4,fontSize:11,textAlign:'center',boxSizing:'border-box',
+                              border:`1px solid ${needSp.includes(k)?G.rd:(bad?'#F0B4B4':G.brd)}`,background:needSp.includes(k)?'#FFF0F0':G.w}}/>
+                          {savingSp===k&&<span style={{fontSize:10}}>⏳</span>}
+                        </div>);})()}
+                    </td>
                     <td style={{padding:'6px',fontSize:10,color:G.mut}}>{it.upc}</td>
                   </tr>
                 );})}</tbody>
@@ -1920,6 +2007,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   const [dtype,setDtype]=useState('No');
   const [dpct,setDpct]=useState(0);
   const [cdsc,setCdsc]=useState('');
+  const [tracking,setTracking]=useState(['']);   // courier tracking number(s) for this invoice
   const [selIt,setSelIt]=useState([]);
   const [sdpct,setSdpct]=useState(10);
   const [curId,setCurId]=useState(null);
@@ -1990,7 +2078,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
     setSelIt([]);
   }
   function resetForm(){
-    setCust({name:'',addr:'',mob:''});setItems([blankSIItem()]);setCtype('Not Free');setCcour('');setDtype('No');setDpct(0);setCdsc('');setCurId(null);
+    setCust({name:'',addr:'',mob:''});setItems([blankSIItem()]);setCtype('Not Free');setCcour('');setDtype('No');setDpct(0);setCdsc('');setCurId(null);setTracking(['']);
   }
   async function save(){
     if(saving) return;
@@ -2042,19 +2130,24 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
       });
       if(error) throw new Error(error.message);
 
+      // Tracking numbers are saved separately (Query-34), so a problem there never
+      // blocks the invoice itself.
+      const trk=tracking.map(x=>String(x||'').trim()).filter(Boolean);
+      let trkErr='';
+      { const { error:tErr }=await supabase.rpc('admin_set_sale_tracking',{p_sale_id:savedId,p_tracking:trk}); if(tErr) trkErr=tErr.message; }
       // Read back the number the database actually assigned.
       const { data: row } = await supabase.from('sales').select('seq,order_id').eq('id',savedId).single();
       const realSeq = row && row.seq!=null ? row.seq : seq;
       const saved={
         id:savedId, seq:realSeq, date:dt, type:'invoice', oid:(row&&row.order_id)||`INV${realSeq}`,
         cname:cust.name, mob:cust.mob, addr:cust.addr,
-        sub, disc:damt, discTotal:pad, courier:cour, grand,
+        sub, disc:damt, discTotal:pad, courier:cour, grand, tracking:trkErr?[]:trk,
         items: lines.map(l=>({pid:l.product_id,name:l.name,qty:l.qty,up:l.unit_price,tp:l.total_price})),
       };
       setSales(p=> curId ? p.map(x=>x.id===curId?saved:x) : [saved,...p]);
       setCurId(savedId);
       if(reloadProducts) await reloadProducts();
-      alert(`Sales invoice #${realSeq} saved — stock updated.`);
+      alert(`Sales invoice #${realSeq} saved — stock updated.`+(trkErr?`\n\n⚠️ The tracking number couldn't be saved (${trkErr}). Has Query-34 been run?`:''));
     }catch(err){
       alert(err.message || 'Failed to save the invoice.');
     }finally{ setSaving(false); }
@@ -2070,7 +2163,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   }
   function printCurrent(){
     const existing = curId ? sales.find(s=>s.id===curId) : null;
-    const html=buildSalesReceiptHTML({orderNo:existing?existing.seq:onum,cname:cust.name,mob:cust.mob,addr:cust.addr,items:items.filter(i=>i.name&&i.qty),sub,pad,cour,grand,hasDsc,qr:qrCodes});
+    const html=buildSalesReceiptHTML({orderNo:existing?existing.seq:onum,cname:cust.name,mob:cust.mob,addr:cust.addr,items:items.filter(i=>i.name&&i.qty),sub,pad,cour,grand,hasDsc,qr:qrCodes,tracking});
     openPrintWindow(html);
   }
   function loadOrder(s){
@@ -2081,6 +2174,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
       return;
     }
     setCurId(s.id);
+    setTracking(s.tracking&&s.tracking.length?[...s.tracking]:['']);
     setCust({name:s.cname||'',mob:s.mob||'',addr:s.addr||''});
     setItems([...s.items.map(i=>{
       const p=prods.find(x=>x.id===i.pid) || prods.find(x=>x.name===i.name);
@@ -2103,7 +2197,7 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
   function printSale(s){
     // Saved sale lines don't carry the pack size, so look it up for the receipt.
     const items=(s.items||[]).map(i=>{const p=prods.find(x=>x.id===i.pid)||prods.find(x=>x.name===i.name);return {...i,pw:i.pw||(p?p.pw:'')};});
-    openPrintWindow(buildSalesReceiptHTML({orderNo:s.seq,cname:s.cname,mob:s.mob,addr:s.addr,items,sub:s.sub,pad:s.discTotal,cour:s.courier,grand:s.grand,hasDsc:s.disc>0,qr:qrCodes}));
+    openPrintWindow(buildSalesReceiptHTML({orderNo:s.seq,cname:s.cname,mob:s.mob,addr:s.addr,items,sub:s.sub,pad:s.discTotal,cour:s.courier,grand:s.grand,hasDsc:s.disc>0,qr:qrCodes,tracking:s.tracking}));
   }
 
   const recent = useMemo(()=>{
@@ -2141,6 +2235,21 @@ function SITab({prods,inv,sales,setSales,catColors,reloadProducts,qrCodes}) {
         <Card><div style={{fontWeight:'bold',fontSize:13,marginBottom:10,color:G.gd}}>Courier</div><FSel value={ctype} onChange={setCtype} options={['Free','Not Free','Customized Courier']}/>{ctype==='Customized Courier'&&<FInput label="Custom (RMB)" value={ccour} onChange={setCcour} type="number"/>}</Card>
         <Card><div style={{fontWeight:'bold',fontSize:13,marginBottom:10,color:G.gd}}>Discount</div><FSel value={dtype} onChange={setDtype} options={['No','Yes','Customized Discount']}/>{dtype==='Yes'&&<FInput label="Discount %" value={dpct} onChange={setDpct} type="number"/>}{dtype==='Customized Discount'&&<FInput label="Amount (RMB)" value={cdsc} onChange={setCdsc} type="number"/>}</Card>
       </div>
+      <Card style={{marginBottom:14}}>
+        <div style={{fontWeight:'bold',fontSize:13,marginBottom:4,color:G.gd}}>📦 Tracking Numbers</div>
+        <div style={{fontSize:11,color:G.mut,marginBottom:10}}>Optional — for invoices sent by courier. Saved with the invoice, shown in the Sales List and printed on the receipt.</div>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:12,maxWidth:560,margin:'0 auto'}}>
+          <thead><tr style={{background:G.gl}}><th style={{padding:'6px',width:36}}>#</th><th style={{padding:'6px'}}>Tracking number</th><th style={{padding:'6px',width:40}}></th></tr></thead>
+          <tbody>{tracking.map((tk,i)=>(
+            <tr key={i} style={{borderBottom:`1px solid ${G.brd}`}}>
+              <td style={{padding:'5px',textAlign:'center',color:G.mut}}>{i+1}</td>
+              <td style={{padding:'5px'}}><input value={tk} onChange={e=>setTracking(p=>p.map((x,j)=>j===i?e.target.value:x))} placeholder="e.g. SF1234567890" style={{width:'100%',boxSizing:'border-box',padding:'6px 9px',borderRadius:5,border:`1px solid ${G.brd}`,fontSize:12}}/></td>
+              <td style={{padding:'5px',textAlign:'center'}}>{tracking.length>1&&<button onClick={()=>setTracking(p=>p.filter((_,j)=>j!==i))} style={{background:'none',border:'none',cursor:'pointer',color:'#B71C1C',fontSize:14}}>✕</button>}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+        <div style={{marginTop:8,textAlign:'center'}}><Btn sm v='info' onClick={()=>setTracking(p=>[...p,''])}>+ Add Tracking #</Btn></div>
+      </Card>
       {overLines.length>0&&(
         <div style={{background:'#FFEBEE',border:`1px solid ${G.rd}`,borderRadius:10,padding:12,marginBottom:14}}>
           <div style={{fontWeight:'bold',color:G.rd,fontSize:13,marginBottom:4}}>⚠️ Not enough stock</div>
@@ -2406,6 +2515,30 @@ function CustTab({couponVer=0,onCouponsChanged}) {
   const [adj,setAdj]=useState(null);     // {id,name,delta,note}
   const [coupons,setCoupons]=useState([]);
   const [cpFor,setCpFor]=useState(null); // customer a coupon is being issued to
+  const [bf,setBf]=useState(null);       // back-credit preview: null | 'loading' | rows[]
+  const [bfBusy,setBfBusy]=useState(false);
+  // Points for orders completed before the points program existed. Preview
+  // first (nothing is written), then credit. The database never credits the
+  // same order twice, so running it again later is harmless.
+  async function previewBackfill(){
+    setBf('loading');
+    const { data, error }=await supabase.rpc('admin_backfill_points',{p_apply:false});
+    if(error){ setBf(null); alert('Could not work out past points:\n\n'+error.message); return; }
+    setBf(data||[]);
+  }
+  async function applyBackfill(){
+    const rows=Array.isArray(bf)?bf:[];
+    const total=rows.reduce((s2,r)=>s2+(+r.points||0),0);
+    if(!window.confirm(`Credit ${total} points to ${rows.length} customer(s) for their past orders?`)) return;
+    setBfBusy(true);
+    try{
+      const { error }=await supabase.rpc('admin_backfill_points',{p_apply:true});
+      if(error){ alert('Could not credit points:\n\n'+error.message); return; }
+      setBf(null);
+      await loadCustomers();
+      alert(`Done — ${total} points credited to ${rows.length} customer(s).`);
+    } finally { setBfBusy(false); }
+  }
 
   async function loadCustomers(){
     const { data, error }=await supabase.rpc('admin_list_customers');
@@ -2557,6 +2690,45 @@ function CustTab({couponVer=0,onCouponsChanged}) {
             </div>
             <div style={{textAlign:'center'}}><Btn onClick={saveSettings} disabled={savingSt}>{savingSt?'Saving…':'💾 Save Settings'}</Btn></div>
           </div>
+        )}
+      </Card>
+
+      <Card style={{marginBottom:12,textAlign:'left'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <div style={{minWidth:0,flex:'1 1 260px'}}>
+            <div style={{fontWeight:'bold',fontSize:14,color:G.gd}}>⭐ Points for past orders</div>
+            <div style={{fontSize:11,color:G.mut,marginTop:3}}>Orders completed before points were switched on haven't earned anything yet. This works out what each one would have earned at today's rates (with the tier the customer was in at the time) and credits it. Orders that already have points are skipped.</div>
+          </div>
+          {bf===null&&<Btn v='info' sm onClick={previewBackfill}>🔍 Preview</Btn>}
+        </div>
+        {bf==='loading'&&<div style={{fontSize:12,color:G.mut,marginTop:10}}>Working it out…</div>}
+        {Array.isArray(bf)&&(
+          bf.length===0
+            ? <div style={{marginTop:10,fontSize:12,color:G.gd,background:G.gl,borderRadius:7,padding:'8px 10px'}}>✅ Everyone is up to date — no completed orders are missing points.
+                <button onClick={()=>setBf(null)} style={{marginLeft:8,background:'none',border:'none',color:G.mut,cursor:'pointer',fontSize:11,textDecoration:'underline'}}>close</button></div>
+            : <div style={{marginTop:10}}>
+                <div style={{overflowX:'auto'}}>
+                  <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+                    <thead><tr style={{background:G.gl}}>
+                      <th style={{padding:'6px 8px',textAlign:'left'}}>Customer</th><th style={{padding:'6px 8px',textAlign:'left'}}>Email</th>
+                      <th style={{padding:'6px 8px',textAlign:'center'}}>Orders</th><th style={{padding:'6px 8px',textAlign:'right'}}>Points to credit</th>
+                    </tr></thead>
+                    <tbody>{bf.map(r=>(
+                      <tr key={r.customer_id} style={{borderBottom:`1px solid ${G.brd}`}}>
+                        <td style={{padding:'6px 8px',textAlign:'left',fontWeight:'bold'}}>{r.full_name||'(no name)'}</td>
+                        <td style={{padding:'6px 8px',textAlign:'left',color:G.mut}}>{r.email||'—'}</td>
+                        <td style={{padding:'6px 8px',textAlign:'center'}}>{r.orders}</td>
+                        <td style={{padding:'6px 8px',textAlign:'right',fontWeight:'bold',color:G.bd}}>⭐ {r.points}</td>
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                </div>
+                <div style={{display:'flex',gap:8,alignItems:'center',marginTop:10,flexWrap:'wrap'}}>
+                  <Btn sm onClick={applyBackfill} disabled={bfBusy}>{bfBusy?'Crediting…':`✅ Credit ${bf.reduce((s2,r)=>s2+(+r.points||0),0)} points to ${bf.length} customer${bf.length!==1?'s':''}`}</Btn>
+                  <button onClick={()=>setBf(null)} style={{background:G.w,border:`1px solid ${G.brd}`,color:G.tx,borderRadius:6,padding:'5px 12px',cursor:'pointer',fontSize:12}}>Cancel</button>
+                  {st&&!st.points_enabled&&<span style={{fontSize:11,color:'#8a6d00'}}>Note: the points program is switched OFF, so customers won't see points until you turn it on.</span>}
+                </div>
+              </div>
         )}
       </Card>
 
@@ -2960,7 +3132,30 @@ function CompTab({couponVer=0,onCouponsChanged}) {
   );
 }
 
-function SLTab({sales,setSales,prods,reloadProducts,reloadInventory,reloadOrders}) {
+// Copy any text to the clipboard (with a fallback for webviews without the API).
+async function copyPlain(txt,msg='Copied!'){
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText) await navigator.clipboard.writeText(txt);
+    else throw new Error('no clipboard');
+  }catch{
+    const ta=document.createElement('textarea'); ta.value=txt; ta.style.position='fixed'; ta.style.opacity='0';
+    document.body.appendChild(ta); ta.focus(); ta.select(); try{ document.execCommand('copy'); }catch{} document.body.removeChild(ta);
+  }
+  alert(msg);
+}
+function saleCopyText(s,lines,sub,disc,trk){
+  const L=[s.cname||'',s.mob||'',s.addr||'','------------------------------'];
+  lines.forEach(it=>L.push(`${it.name}${it.pw?` (${it.pw}g)`:''} ×${it.qty}: ¥${it.amt.toFixed(2)}`));
+  L.push('------------------------------');
+  L.push(`Subtotal: ¥${(+sub||0).toFixed(2)}`);
+  if(disc>0) L.push(`Price After Discount: ¥${((+sub||0)-disc).toFixed(2)}`);
+  L.push(`Courier: ¥${(+s.courier||0).toFixed(2)}`);
+  L.push('------------------------------');
+  L.push(`Grand Total: ¥${(+s.grand||0).toFixed(2)}`);
+  if(trk&&trk.length) L.push(`Tracking: ${trk.join(', ')}`);
+  return L.join('\n');
+}
+function SLTab({sales,setSales,prods,orders,reloadProducts,reloadInventory,reloadOrders}) {
   const [q,setQ]=useState('');
   const [exp,setExp]=useState(new Set());
   const [sel,setSel]=useState([]);
@@ -3038,20 +3233,75 @@ function SLTab({sales,setSales,prods,reloadProducts,reloadInventory,reloadOrders
                   <td style={{padding:'7px',textAlign:'center'}}>¥{s.courier?.toFixed(2)}</td>
                   <td style={{padding:'7px',textAlign:'center',fontWeight:'bold',fontSize:14,color:G.gd}}>¥{s.grand?.toFixed(2)}</td>
                 </tr>
-                {exp.has(s.id)&&(
-                  <tr><td colSpan={11} style={{background:G.gl,padding:'10px 18px'}}>
-                    <div style={{fontWeight:'bold',fontSize:11,color:G.gd,marginBottom:6}}>Items Ordered:</div>
-                    {s.items.map((it,k)=>(
-                      <div key={k} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'3px 0',borderBottom:k<s.items.length-1?`1px dashed ${G.brd}`:'none'}}>
-                        <div>
-                          <span>{it.name} × {it.qty}</span>
-                          {it.draw&&it.draw.length>0&&<div style={{fontSize:10,color:G.mut,marginTop:1}}>Exp: {it.draw.map(d=>`${d.expiry||'—'}${it.draw.length>1?` (×${d.qty})`:''}`).join(', ')}</div>}
+                {exp.has(s.id)&&(()=>{
+                  // Details laid out like the Online Orders cards: who it went to,
+                  // what was in it (with the expiry batch each item came from), and tracking.
+                  const ord=s.type==='online'?(orders||[]).find(o=>o.id===s.oid):null;
+                  const trk=((ord?ord.tracking:s.tracking)||[]).filter(x=>x&&String(x).trim());
+                  const lines=(s.items||[]).map(it=>{
+                    const p=(prods||[]).find(x=>x.id===it.pid)||(prods||[]).find(x=>x.name===it.name);
+                    const sp=s.type==='online'?((p&&p.sp>=it.up)?p.sp:it.up):null;
+                    const amt=s.type==='online'?sp*it.qty:(it.tp!=null?+it.tp:it.up*it.qty);
+                    return {...it,pw:p?p.pw:null,amt};
+                  });
+                  const box={background:G.w,borderRadius:8,padding:12,border:`1px solid ${G.brd}`,textAlign:'left',minWidth:0};
+                  const head={fontSize:10,color:G.mut,fontWeight:'bold',marginBottom:8,letterSpacing:0.3};
+                  const row={display:'flex',justifyContent:'space-between',gap:8};
+                  return(
+                  <tr><td colSpan={11} style={{background:G.gl,padding:'12px 14px'}}>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:12}}>
+                      <div style={box}>
+                        <div style={head}>{s.type==='online'?'DELIVER TO':'CUSTOMER'}</div>
+                        <div style={{fontSize:13,fontWeight:'bold',color:G.dk}}>{s.cname||'—'}</div>
+                        <div style={{fontSize:12,color:G.tx,marginTop:3}}>📱 {s.mob||'—'}</div>
+                        <div style={{fontSize:12,color:G.tx,marginTop:4,lineHeight:1.5,whiteSpace:'pre-wrap'}}>📍 {s.addr||'—'}</div>
+                        <div style={{fontSize:11,color:G.mut,marginTop:8}}>
+                          {s.type==='online'?'🛒 Online order':'💰 Walk-in invoice'} · {s.oid||'—'}
                         </div>
-                        <span>¥{(it.tp!=null?it.tp:it.up*it.qty).toFixed(2)}</span>
+                        <div style={{fontSize:11,color:G.mut,marginTop:2}}>
+                          {ord?`Ordered ${ord.date} ${ord.time||''}`:`Sold ${s.date}`}{ord&&ord.payMethod?` · ${ord.payMethod==='alipay'?'💙 Alipay':'💚 WeChat Pay'}`:''}
+                        </div>
+                        {ord&&ord.proofUrl&&<a href={ord.proofUrl} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:G.bd,display:'inline-block',marginTop:4}}>🧾 View payment proof</a>}
                       </div>
-                    ))}
+                      <div style={box}>
+                        <div style={head}>ITEMS</div>
+                        {lines.map((it,k)=>(
+                          <div key={k} style={{padding:'4px 0',borderBottom:k<lines.length-1?`1px dashed ${G.brd}`:'none'}}>
+                            <div style={{...row,fontSize:12}}>
+                              <span>{it.name}{it.pw?<span style={{color:G.mut}}> ({it.pw}g)</span>:null} ×{it.qty}</span>
+                              <span style={{whiteSpace:'nowrap'}}>¥{it.amt.toFixed(2)}</span>
+                            </div>
+                            {it.draw&&it.draw.length>0&&(
+                              <div style={{fontSize:10,color:G.gd,marginTop:2}}>
+                                📅 Exp: {it.draw.map(d=>`${d.expiry?ddmmyyyy(d.expiry):'—'}${it.draw.length>1?` (×${d.qty})`:''}`).join(', ')}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                        <div style={{borderTop:`1px solid ${G.brd}`,marginTop:8,paddingTop:8,fontSize:12}}>
+                          <div style={{...row,color:dispDisc>0?G.mut:G.tx,textDecoration:dispDisc>0?'line-through':'none'}}><span>Subtotal</span><span>¥{(+dispSub||0).toFixed(2)}</span></div>
+                          {dispDisc>0&&<div style={{...row,color:G.gd,fontWeight:'bold'}}><span>Price After Discount</span><span>¥{((+dispSub||0)-dispDisc).toFixed(2)}</span></div>}
+                          <div style={row}><span>Courier</span><span>¥{(+s.courier||0).toFixed(2)}</span></div>
+                          <div style={{...row,fontWeight:'bold',fontSize:13,color:G.gd,marginTop:3}}><span>Grand Total</span><span>¥{(+s.grand||0).toFixed(2)}</span></div>
+                        </div>
+                      </div>
+                      <div style={box}>
+                        <div style={{...head,color:trk.length?G.gd:G.mut}}>📦 TRACKING{trk.length?'':' — none added'}</div>
+                        {trk.map((tk,k)=>(
+                          <div key={k} style={{display:'flex',alignItems:'center',gap:6,background:G.bg,borderRadius:6,padding:'6px 9px',marginBottom:6,fontSize:12,fontWeight:'bold',color:G.dk}}>
+                            <span style={{flex:1,wordBreak:'break-all'}}>{tk}</span>
+                            <button title="Copy" onClick={()=>copyPlain(String(tk))} style={{background:'none',border:`1px solid ${G.brd}`,borderRadius:5,cursor:'pointer',fontSize:11,padding:'2px 7px'}}>📋</button>
+                          </div>
+                        ))}
+                        <div style={{fontSize:10,color:G.mut,marginTop:4}}>
+                          {s.type==='online'?'Add or change it in Online Orders → Completed Orders.':'Add or change it in Sales Invoice (load this invoice).'}
+                        </div>
+                        <button onClick={()=>copyPlain(saleCopyText(s,lines,dispSub,dispDisc,trk))} style={{marginTop:10,background:G.bg,border:`1px solid ${G.brd}`,borderRadius:7,padding:'5px 10px',fontSize:11,cursor:'pointer',color:G.tx,fontWeight:'bold'}}>📋 Copy order info</button>
+                      </div>
+                    </div>
                   </td></tr>
-                )}
+                  );
+                })()}
               </React.Fragment>
               );
             })}</tbody>
@@ -3112,11 +3362,11 @@ function AdminApp({prods,setProds,cats,setCats,catColors,setCatColors,inv,setInv
          {visitedTabs.has('dash')&&<div style={{display:tab==='dash'?'block':'none'}}><TabErrorBoundary key="dash"><DashTab prods={prods} inv={inv} orders={orders} sales={sales} catColors={catColors} customSlides={customSlides} setCustomSlides={setCustomSlides} qrCodes={qrCodes} setQrCodes={setQrCodes} goTab={setTab}/></TabErrorBoundary></div>}
          {visitedTabs.has('prods')&&<div style={{display:tab==='prods'?'block':'none'}}><TabErrorBoundary key="prods"><ProdTab prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} orders={orders} sales={sales}/></TabErrorBoundary></div>}
          {visitedTabs.has('inv')&&<div style={{display:tab==='inv'?'block':'none'}}><TabErrorBoundary key="inv"><InvTab inv={inv} setInv={setInv} prods={prods} setProds={setProds} cats={cats} catColors={catColors} delInv={delInv} setDelInv={setDelInv} reloadProducts={reloadProducts}/></TabErrorBoundary></div>}
-         {visitedTabs.has('pi')&&<div style={{display:tab==='pi'?'block':'none'}}><TabErrorBoundary key="pi"><PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors}/></TabErrorBoundary></div>}
-         {visitedTabs.has('pl')&&<div style={{display:tab==='pl'?'block':'none'}}><TabErrorBoundary key="pl"><PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} prods={prods} catColors={catColors}/></TabErrorBoundary></div>}
+         {visitedTabs.has('pi')&&<div style={{display:tab==='pi'?'block':'none'}}><TabErrorBoundary key="pi"><PITab prods={prods} pos={pos} setPOs={setPOs} catColors={catColors} reloadInventory={reloadInventory}/></TabErrorBoundary></div>}
+         {visitedTabs.has('pl')&&<div style={{display:tab==='pl'?'block':'none'}}><TabErrorBoundary key="pl"><PLTab pos={pos} setPOs={setPOs} inv={inv} setInv={setInv} prods={prods} catColors={catColors} reloadInventory={reloadInventory}/></TabErrorBoundary></div>}
          {visitedTabs.has('oo')&&<div style={{display:tab==='oo'?'block':'none'}}><TabErrorBoundary key="oo"><OOTab orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} inv={inv} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/></TabErrorBoundary></div>}
          {visitedTabs.has('si')&&<div style={{display:tab==='si'?'block':'none'}}><TabErrorBoundary key="si"><SITab prods={prods} inv={inv} sales={sales} setSales={setSales} catColors={catColors} reloadProducts={reloadProducts} qrCodes={qrCodes}/></TabErrorBoundary></div>}
-         {visitedTabs.has('sl')&&<div style={{display:tab==='sl'?'block':'none'}}><TabErrorBoundary key="sl"><SLTab sales={sales} setSales={setSales} prods={prods} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/></TabErrorBoundary></div>}
+         {visitedTabs.has('sl')&&<div style={{display:tab==='sl'?'block':'none'}}><TabErrorBoundary key="sl"><SLTab sales={sales} setSales={setSales} prods={prods} orders={orders} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={reloadOrders}/></TabErrorBoundary></div>}
          {visitedTabs.has('cust')&&<div style={{display:tab==='cust'?'block':'none'}}><TabErrorBoundary key="cust"><CustTab couponVer={couponVer} onCouponsChanged={bumpCoupons}/></TabErrorBoundary></div>}
          {visitedTabs.has('comp')&&<div style={{display:tab==='comp'?'block':'none'}}><TabErrorBoundary key="comp"><CompTab couponVer={couponVer} onCouponsChanged={bumpCoupons}/></TabErrorBoundary></div>}
         </div>
