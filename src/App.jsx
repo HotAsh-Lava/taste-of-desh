@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
-import { supabase } from './supabaseClient';
+import { supabase, SUPABASE_DIRECT_URL, API_URL } from './supabaseClient';
 
 // The entire admin panel is loaded on demand (its own bundle chunk), so a
 // customer visiting the storefront never downloads any of the admin code.
@@ -27,7 +27,9 @@ const GLOBAL_CSS = `
   @keyframes todSheetUp { from { transform: translateY(40px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
   .tod-star { display:inline-block; animation: todStarSpin 3.6s linear infinite, todStarGlow 1.8s ease-in-out infinite; transform-origin: 50% 50%; }
   .tod-bar-shine { position:absolute; top:0; bottom:0; width:40%; background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent); animation: todBarShine 2.6s ease-in-out infinite; }
-  @media (prefers-reduced-motion: reduce) { .tod-star, .tod-bar-shine { animation: none; } }
+  @keyframes todSkel { 0% { background-position: -200px 0; } 100% { background-position: 200px 0; } }
+  .tod-skel { background: linear-gradient(90deg,#ECEFEC 0px,#F6F7F6 80px,#ECEFEC 160px); background-size: 400px 100%; animation: todSkel 1.2s linear infinite; }
+  @media (prefers-reduced-motion: reduce) { .tod-star, .tod-bar-shine, .tod-skel { animation: none; } }
 `;
 function useGlobalCss(){
   useEffect(()=>{
@@ -132,6 +134,33 @@ const TR = {
 };
 function useT(lang){ return (k)=> (TR[lang]&&TR[lang][k]) || TR.en[k] || k; }
 
+// Low-level network failures ("Load failed" on iPhone/WeChat, "Failed to fetch"
+// on Android/Chrome) mean the request never reached the server. Say that in
+// words a shopper can act on, instead of showing the raw browser message.
+export function isNetErr(msg){ return /load failed|failed to fetch|networkerror|network request failed|fetch failed|aborted|timed? ?out|err_/i.test(String(msg||'')); }
+export function friendlyNetError(msg){ return isNetErr(msg) ? "Can't reach our server right now. Please check your internet connection and try again." : String(msg||''); }
+
+// Shown while the catalogue is loading, and when it couldn't be loaded.
+function ProductSkeletons({n=4}){
+  return Array.from({length:n}).map((_,i)=>(
+    <div key={i} style={{background:G.w,borderRadius:12,border:`1px solid ${G.brd}`,padding:10}}>
+      <div className="tod-skel" style={{height:110,borderRadius:8,marginBottom:10}}/>
+      <div className="tod-skel" style={{height:12,borderRadius:6,marginBottom:6,width:'80%'}}/>
+      <div className="tod-skel" style={{height:12,borderRadius:6,width:'45%'}}/>
+    </div>
+  ));
+}
+function LoadProblem({onRetry}){
+  return(
+    <div style={{gridColumn:'1/-1',textAlign:'center',padding:'34px 18px',background:G.w,borderRadius:14,border:`1px solid ${G.brd}`}}>
+      <div style={{fontSize:34,marginBottom:6}}>📶</div>
+      <div style={{fontWeight:'bold',color:G.dk,fontSize:15,marginBottom:6}}>Couldn't load products</div>
+      <div style={{fontSize:12,color:G.mut,marginBottom:14,lineHeight:1.6}}>The connection is slow or was interrupted.<br/>网络不稳定，请检查网络后重试。</div>
+      <button onClick={onRetry} style={{background:G.gm,color:G.w,border:'none',borderRadius:22,padding:'10px 26px',fontWeight:'bold',fontSize:14,cursor:'pointer'}}>↻ Try again</button>
+    </div>
+  );
+}
+
 export function openPrintWindow(html){
   const w=window.open('','_blank');
   if(!w){alert('Please allow pop-ups for this site to print or save the PDF.');return;}
@@ -169,7 +198,8 @@ export function buildPOHTML({poNum,date,time,vendor,hdr,items,totQty,totC,totS,b
     <div style="margin-top:10px;font-size:11px;color:#666">Per Pkt (RMB) includes each pack's share of the BD and China courier, split by gross weight.</div>
   </body></html>`;
 }
-export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour,grand,hasDsc,qr}){
+export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour,grand,hasDsc,qr,tracking}){
+  const trk=(tracking||[]).filter(x=>x&&String(x).trim());
   // Pack size per line (customers asked which size they were getting — e.g.
   // Black Tea 100g vs 200g share a name).
   const rows=items.map(i=>`<tr><td>${i.name}</td><td class="center">${+i.pw>0?`${+i.pw}g`:'-'}</td><td style="text-align:center">${i.qty}</td><td style="text-align:right">¥${(+i.up).toFixed(2)}</td><td style="text-align:right">¥${(+i.tp).toFixed(2)}</td></tr>`).join('');
@@ -195,6 +225,7 @@ export function buildSalesReceiptHTML({orderNo,cname,mob,addr,items,sub,pad,cour
     <div style="margin-top:10px">Order #: <b>${orderNo}</b></div>
     <div>Customer: ${cname||'-'} &nbsp; Mobile: ${mob||'-'}</div>
     <div>Address: ${addr||'-'}</div>
+    ${trk.length?`<div>Tracking #: <b>${trk.join(', ')}</b></div>`:''}
     <table><thead><tr><th>Product</th><th class="center">Pack</th><th class="center">Qty</th><th>Unit Price</th><th>Total</th></tr></thead><tbody>${rows}</tbody></table>
     <div class="tot">
       <div><span>Subtotal</span><span>¥${sub.toFixed(2)}</span></div>
@@ -543,7 +574,7 @@ export function Slideshow({slides,addToCart}) {
   );
 }
 
-function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}) {
+function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors,pubStatus,onRetry}) {
   const bs = products.filter(p=>p.bs&&p.avail>0);
   const offers = products.filter(p=>p.offer&&p.avail>0);
   const slides = useMemo(()=>{
@@ -606,14 +637,16 @@ function HomeTab({products,categories,addToCart,setTab,t,customSlides,catColors}
           <div style={{color:G.g,fontSize:12,cursor:'pointer',fontWeight:'bold'}} onClick={()=>setTab('categories')}>{t('viewAll')} →</div>
         </div>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
-          {bs.slice(0,8).map(p=><PCard key={p.id} p={p} addToCart={addToCart}/>)}
+          {products.length===0
+            ? (pubStatus==='error' ? <LoadProblem onRetry={onRetry}/> : <ProductSkeletons n={4}/>)
+            : bs.slice(0,8).map(p=><PCard key={p.id} p={p} addToCart={addToCart}/>)}
         </div>
       </div>
     </div>
   );
 }
 
-function CatTab({products,categories,addToCart,t}) {
+function CatTab({products,categories,addToCart,t,pubStatus,onRetry}) {
   const [active,setActive] = useState('All');
   const [q,setQ] = useState('');
   const allCats = ['All','Best Sellers','Offers',...categories];
@@ -645,9 +678,11 @@ function CatTab({products,categories,addToCart,t}) {
         })}
       </div>
       <div style={{padding:'16px',display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
-        {list.length===0
-          ? <div style={{gridColumn:'1/-1',textAlign:'center',padding:40,color:G.mut}}>No products found</div>
-          : list.map(p=><PCard key={p.id} p={p} addToCart={addToCart}/>)
+        {products.length===0
+          ? (pubStatus==='error' ? <LoadProblem onRetry={onRetry}/> : <ProductSkeletons n={6}/>)
+          : list.length===0
+            ? <div style={{gridColumn:'1/-1',textAlign:'center',padding:40,color:G.mut}}>No products found</div>
+            : list.map(p=><PCard key={p.id} p={p} addToCart={addToCart}/>)
         }
       </div>
     </div>
@@ -928,9 +963,10 @@ export async function uploadToBucket(bucket, file, folder='') {
   const path = `${folder ? folder + '/' : ''}${Date.now()}-${Math.random().toString(36).slice(2,8)}.${ext}`;
   const { error } = await supabase.storage.from(bucket)
     .upload(path, file, { cacheControl:'31536000', upsert:false, contentType:file.type });
-  if(error) throw new Error('Upload failed: ' + error.message);
-  const { data } = supabase.storage.from(bucket).getPublicUrl(path);
-  return data.publicUrl;
+  if(error) throw new Error('Upload failed: ' + friendlyNetError(error.message));
+  // Store the canonical supabase.co URL (not the proxy one) so the database
+  // never depends on which front door the app happened to use.
+  return `${SUPABASE_DIRECT_URL}${IMG_PUBLIC}/${bucket}/${path}`;
 }
 
 // Fetch the profiles row (role, full_name, etc.) for a logged-in user.
@@ -1069,7 +1105,9 @@ function cdnImage(url){
   if(!url) return url;
   const i = url.indexOf(IMG_PUBLIC);
   if(i === -1) return url;
-  if(!/^https:\/\/[a-z0-9-]+\.supabase\.co/i.test(url)) return url;
+  // Stored URLs normally point at supabase.co; ones written while the app talked
+  // to the API proxy point at our own domain. Both go through the cached image path.
+  if(!/^https:\/\/[a-z0-9-]+\.supabase\.co/i.test(url) && !url.startsWith(API_URL + '/')) return url;
   return IMG_CDN + url.slice(i + IMG_PUBLIC.length);
 }
 // Display (CDN) -> DB (raw Supabase), so the database always stores the canonical
@@ -1079,10 +1117,7 @@ function rawImage(url){
   const rel = url.slice(IMG_CDN.length + 1);        // e.g. product-images/1699-ab12.webp
   const slash = rel.indexOf('/');
   if(slash === -1) return url;
-  const bucket = rel.slice(0, slash);
-  const key    = rel.slice(slash + 1);
-  try { return supabase.storage.from(bucket).getPublicUrl(key).data.publicUrl; }
-  catch { return url; }
+  return `${SUPABASE_DIRECT_URL}${IMG_PUBLIC}/${rel}`;
 }
 
 // Products
@@ -1154,6 +1189,7 @@ function fromDbSale(row, items) {
     items: items.map(it => ({ pid: it.product_id || null, name: it.name, qty: it.qty, up: it.unit_price, tp: it.total_price, draw: it.batch_draw || [] })),
     sub: row.subtotal, disc: row.discount, discTotal: row.discount_total,
     courier: row.courier_fee, grand: row.grand_total,
+    tracking: Array.isArray(row.tracking) ? row.tracking : [],
   };
 }
 export function toDbSale(sale) {
@@ -1171,7 +1207,7 @@ function fromDbOrder(row, items) {
     mob: row.mobile, addr: row.address, status: row.status, tracking: row.tracking || [],
     custCourier: row.customer_courier_fee, discTotal: row.discount_total,
     userId: row.customer_id || null,           // who placed it (RLS ownership column)
-    proofUrl: row.payment_proof_url || '',     // uploaded payment screenshot
+    proofUrl: cdnImage(row.payment_proof_url || ''),   // uploaded payment screenshot (via the China-reachable CDN)
     payMethod: row.payment_method || '',       // 'alipay' | 'wechat'
     paid: !!row.paid, notes: row.notes || '',
     plannedAlloc: row.planned_alloc || null,   // saved batch/expiry pick, set before completing
@@ -1193,14 +1229,43 @@ export function toDbPO(po) {
   };
 }
 
+// Auth error → plain words. Covers the messages Supabase Auth actually returns.
+export function friendlyAuthError(msg){
+  const m=String(msg||'');
+  if(isNetErr(m)) return "Can't reach our server right now. Please check your internet connection and try again. (网络连接失败，请重试)";
+  if(/invalid login credentials/i.test(m)) return 'Email or password is incorrect.';
+  if(/email not confirmed/i.test(m)) return "Your email isn't verified yet.";
+  if(/token has expired|otp.*(expired|invalid)|invalid (otp|token)|expired or is invalid/i.test(m)) return 'That code is wrong or has expired. Tap "Send Code" to get a new one.';
+  if(/rate limit|security purposes|only request this|too many/i.test(m)) return 'Please wait a minute before asking for another code.';
+  if(/password should be at least|weak password|password is too short/i.test(m)) return 'Password must be at least 6 characters.';
+  if(/already registered|already been registered|user already exists/i.test(m)) return 'This email is already registered. Please log in instead.';
+  if(/signups? not allowed/i.test(m)) return 'New sign-ups are paused right now. Please contact us on WeChat.';
+  if(/unable to validate email|invalid format|email address .* invalid/i.test(m)) return 'Please enter a valid email address.';
+  return m || 'Something went wrong. Please try again.';
+}
+const normEmail=(e)=>String(e||'').trim().toLowerCase();
+const validEmail=(e)=>/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e);
+// 'none' | 'unconfirmed' | 'confirmed', or null if we couldn't check (Query-34).
+async function emailStatus(email){
+  try{ const { data, error }=await supabase.rpc('auth_email_status',{p_email:email}); return error?null:data; }
+  catch{ return null; }
+}
+
 function AuthScreen({onLogin,t}) {
   const [mode,setMode]=useState('login'); // 'login' | 'register' | 'reset'
   const [form,setForm]=useState({email:'',password:'',name:'',confirm:'',newPassword:'',newConfirm:'',otp:''});
   const [otpSent,setOtpSent]=useState(false);
   const [otpCooldown,setOtpCooldown]=useState(0);
   const [busy,setBusy]=useState(false);
+  // Inline message under the form (alerts are easy to miss in WeChat's browser).
+  // {kind:'error'|'ok'|'info', text, action?:{label,fn}}
+  const [notice,setNotice]=useState(null);
+  // Which code the reset screen is waiting for: a normal password-reset code, or a
+  // sign-up code for an account that never finished verifying its email.
+  const [verifyKind,setVerifyKind]=useState('recovery');
 
   function set(f,v){setForm(p=>({...p,[f]:v}));}
+  const say=(kind,text,action)=>{ setNotice({kind,text,action}); };
 
   useEffect(()=>{
     if(otpCooldown<=0) return;
@@ -1210,16 +1275,13 @@ function AuthScreen({onLogin,t}) {
 
   function switchMode(m){
     setMode(m);
-    setOtpSent(false);setOtpCooldown(0);
+    setOtpSent(false);setOtpCooldown(0);setNotice(null);setVerifyKind('recovery');
     setForm(p=>({...p,otp:''}));
   }
 
   // Completes login: fetches the profiles row and hands the merged
   // user object up to App.jsx via onLogin().
   async function completeLogin(userId, fallbackEmail){
-    // BUG FIX: `profile` was used here but never defined, which threw a
-    // ReferenceError and meant onLogin() never ran — that's why you had to
-    // refresh the page after logging in.
     const profile = await fetchProfile(userId);
     onLogin({
       id: userId,
@@ -1230,73 +1292,143 @@ function AuthScreen({onLogin,t}) {
     });
   }
 
-  // "Send Code" button. Behaves differently depending on mode:
-  // - register: creates the (unconfirmed) auth user now, which triggers the signup OTP email
-  // - reset: triggers the password-recovery OTP email for an existing user
+  const alreadyRegistered=()=>say('error','This email is already registered. Please log in — or tap "Forgot password" if you don\'t remember it.',{label:'Go to Login',fn:()=>switchMode('login')});
+  async function resendSignup(email){
+    if(typeof supabase.auth.resend==='function') return supabase.auth.resend({type:'signup',email});
+    return supabase.auth.signUp({email,password:form.password||form.newPassword});   // older client: re-signup resends
+  }
+
+  // "Send Code" — checks the email first so the customer gets a real answer:
+  //   register: already registered → say so; started before but never verified →
+  //             re-send that sign-up code; new → create the account (sends code).
+  //   reset:    no account → say so; never verified → send a sign-up code instead
+  //             (finishing it also sets the new password); normal → reset code.
   async function sendOtp(){
-    if(!form.email){alert('Enter your email first');return;}
-    setBusy(true);
+    const email=normEmail(form.email);
+    if(!validEmail(email)){ say('error','Please enter a valid email address.'); return; }
+    if(mode==='register'){
+      if(!form.name.trim()){ say('error','Please enter your name first.'); return; }
+      if((form.password||'').length<6){ say('error','Password must be at least 6 characters.'); return; }
+      if(form.password!==form.confirm){ say('error','Passwords do not match.'); return; }
+    } else if(mode==='reset'){
+      if((form.newPassword||'').length<6){ say('error','New password must be at least 6 characters.'); return; }
+      if(form.newPassword!==form.newConfirm){ say('error','Passwords do not match.'); return; }
+    }
+    setBusy(true); setNotice(null);
     try{
+      const status=await emailStatus(email);
       if(mode==='register'){
-        if(!form.name||!form.password){alert('Please fill in name and password first');setBusy(false);return;}
-        if(form.password!==form.confirm){alert('Passwords do not match');setBusy(false);return;}
-        const { error } = await supabase.auth.signUp({
-          email: form.email,
-          password: form.password,
-          options: { data: { full_name: form.name } },
-        });
-        if(error){alert(error.message);setBusy(false);return;}
-      } else if(mode==='reset'){
-        const { error } = await supabase.auth.resetPasswordForEmail(form.email);
-        if(error){alert(error.message);setBusy(false);return;}
+        if(status==='confirmed'){ alreadyRegistered(); return; }
+        if(status==='unconfirmed'){
+          const { error }=await resendSignup(email);
+          if(error){ say('error',friendlyAuthError(error.message)); return; }
+        } else {
+          const { data, error }=await supabase.auth.signUp({
+            email, password: form.password, options:{ data:{ full_name: form.name.trim() } },
+          });
+          if(error){
+            if(/already registered|already exists/i.test(error.message||'')){ alreadyRegistered(); return; }
+            say('error',friendlyAuthError(error.message)); return;
+          }
+          // Supabase's way of saying "that email is taken" without an error.
+          if(data?.user && Array.isArray(data.user.identities) && data.user.identities.length===0){ alreadyRegistered(); return; }
+        }
+        setVerifyKind('signup');
+      } else {
+        if(status==='none'){
+          say('error','No account uses this email. Check the spelling, or create a new account.',{label:'Create an account',fn:()=>switchMode('register')});
+          return;
+        }
+        if(status==='unconfirmed'){
+          const { error }=await resendSignup(email);
+          if(error){ say('error',friendlyAuthError(error.message)); return; }
+          setVerifyKind('signup');
+        } else {
+          const { error }=await supabase.auth.resetPasswordForEmail(email);
+          if(error){ say('error',friendlyAuthError(error.message)); return; }
+          setVerifyKind('recovery');
+        }
       }
-      setOtpSent(true);setOtpCooldown(60);
-      alert(`Verification code sent to ${form.email}`);
+      set('email',email);
+      setOtpSent(true); setOtpCooldown(60);
+      say('ok',`Code sent to ${email}. It can take a minute to arrive — please check your Spam/Junk folder too. (QQ and 163 email work best in China.)`);
+    } catch(e){
+      say('error',friendlyAuthError(e&&e.message));
     } finally {
       setBusy(false);
     }
   }
 
   async function doLogin(){
-    if(!form.email||!form.password){alert('Enter email and password');return;}
-    setBusy(true);
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: form.email, password: form.password,
-    });
-    setBusy(false);
-    if(error){alert(error.message);return;}
-    await completeLogin(data.user.id, data.user.email);
+    const email=normEmail(form.email);
+    if(!email||!form.password){ say('error','Enter your email and password.'); return; }
+    setBusy(true); setNotice(null);
+    try{
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password: form.password });
+      if(error){
+        const m=error.message||'';
+        if(/email not confirmed/i.test(m)){
+          say('error',"Your email isn't verified yet. Tap below — we'll email you a code, and you can set your password at the same time.",
+            {label:'Verify my email',fn:()=>{ switchMode('reset'); setForm(p=>({...p,email,newPassword:p.password,newConfirm:p.password})); }});
+          return;
+        }
+        if(/invalid login credentials/i.test(m)){
+          const st=await emailStatus(email);
+          if(st==='none') say('error','No account uses this email. Check the spelling, or create a new account.',{label:'Create an account',fn:()=>switchMode('register')});
+          else say('error','Wrong password. Try again, or reset it.',{label:'Forgot password',fn:()=>switchMode('reset')});
+          return;
+        }
+        say('error',friendlyAuthError(m)); return;
+      }
+      await completeLogin(data.user.id, data.user.email);
+    } catch(e){
+      say('error',friendlyAuthError(e&&e.message));
+    } finally { setBusy(false); }
   }
 
   async function doRegister(){
-    if(!form.name||!form.email||!form.password){alert('Please fill in name, email and password');return;}
-    if(form.password!==form.confirm){alert('Passwords do not match');return;}
-    if(!otpSent||!form.otp){alert('Please request and enter your verification code');return;}
-    setBusy(true);
-    const { data, error } = await supabase.auth.verifyOtp({
-      email: form.email, token: form.otp, type: 'signup',
-    });
-    setBusy(false);
-    if(error){alert(error.message);return;}
-    // New account exists now — if they arrived from a friend's referral link,
-    // record it. Deliberately after the account is created and never fatal.
-    await claimPendingReferral();
-    await completeLogin(data.user.id, data.user.email);
+    const email=normEmail(form.email);
+    const token=String(form.otp||'').replace(/\s+/g,'');
+    if(!form.name.trim()||!email||!form.password){ say('error','Please fill in your name, email and password.'); return; }
+    if(form.password!==form.confirm){ say('error','Passwords do not match.'); return; }
+    if(!otpSent){ say('error','Tap "Send Code" first — we\'ll email you a verification code.'); return; }
+    if(!token){ say('error','Enter the code from your email.'); return; }
+    setBusy(true); setNotice(null);
+    try{
+      const { data, error } = await supabase.auth.verifyOtp({ email, token, type:'signup' });
+      if(error){ say('error',friendlyAuthError(error.message)); return; }
+      // If they started signing up before with a different password or name,
+      // make sure what they typed just now is what's saved. Best-effort.
+      try{ await supabase.auth.updateUser({ password: form.password, data:{ full_name: form.name.trim() } }); }catch{}
+      try{ await supabase.from('profiles').update({ full_name: form.name.trim() }).eq('id', data.user.id); }catch{}
+      // New account exists now — if they arrived from a friend's referral link,
+      // record it. Deliberately after the account is created and never fatal.
+      await claimPendingReferral();
+      await completeLogin(data.user.id, data.user.email);
+    } catch(e){
+      say('error',friendlyAuthError(e&&e.message));
+    } finally { setBusy(false); }
   }
 
   async function doReset(){
-    if(!form.email||!form.newPassword){alert('Please fill in your email and new password');return;}
-    if(form.newPassword!==form.newConfirm){alert('Passwords do not match');return;}
-    if(!otpSent||!form.otp){alert('Please request and enter your verification code');return;}
-    setBusy(true);
-    const { data, error } = await supabase.auth.verifyOtp({
-      email: form.email, token: form.otp, type: 'recovery',
-    });
-    if(error){setBusy(false);alert(error.message);return;}
-    const { error: updErr } = await supabase.auth.updateUser({ password: form.newPassword });
-    setBusy(false);
-    if(updErr){alert(updErr.message);return;}
-    await completeLogin(data.user.id, data.user.email);
+    const email=normEmail(form.email);
+    const token=String(form.otp||'').replace(/\s+/g,'');
+    if(!email||!form.newPassword){ say('error','Please fill in your email and new password.'); return; }
+    if(form.newPassword.length<6){ say('error','New password must be at least 6 characters.'); return; }
+    if(form.newPassword!==form.newConfirm){ say('error','Passwords do not match.'); return; }
+    if(!otpSent){ say('error','Tap "Send Code" first — we\'ll email you a verification code.'); return; }
+    if(!token){ say('error','Enter the code from your email.'); return; }
+    setBusy(true); setNotice(null);
+    try{
+      const { data, error } = await supabase.auth.verifyOtp({ email, token, type: verifyKind });
+      if(error){ say('error',friendlyAuthError(error.message)); return; }
+      const { error: updErr } = await supabase.auth.updateUser({ password: form.newPassword });
+      // Choosing the same password as before isn't a problem — they're in.
+      if(updErr && !/same|different from the old/i.test(updErr.message||'')){ say('error',friendlyAuthError(updErr.message)); return; }
+      await completeLogin(data.user.id, data.user.email);
+    } catch(e){
+      say('error',friendlyAuthError(e&&e.message));
+    } finally { setBusy(false); }
   }
 
   const C = {dark:'#0d522c', btn:'#3c7962', pill:'#77bba2', gold:'#f4ca44'};
@@ -1306,12 +1438,26 @@ function AuthScreen({onLogin,t}) {
   const linkTxt={textAlign:'center',fontSize:13,color:C.dark,cursor:'pointer',fontWeight:700};
   const otpBtn={border:'none',borderRadius:20,padding:'0 16px',minWidth:92,fontWeight:700,fontSize:12,whiteSpace:'nowrap',background:otpCooldown>0||busy?'#D8DFDB':C.gold,color:otpCooldown>0||busy?'#8E948F':C.dark,cursor:otpCooldown>0||busy?'default':'pointer'};
 
+  const NoticeBox = notice ? (
+    <div role="alert" style={{margin:'4px 0 12px',padding:'11px 14px',borderRadius:14,fontSize:13,lineHeight:1.5,textAlign:'left',
+      background:notice.kind==='error'?'#FDECEA':notice.kind==='ok'?'#E8F5E9':'#E3F2FD',
+      color:notice.kind==='error'?'#9B1C1C':notice.kind==='ok'?'#1B5E20':'#0D47A1',
+      border:`1px solid ${notice.kind==='error'?'#F5C2C0':notice.kind==='ok'?'#A5D6A7':'#90CAF9'}`}}>
+      {notice.kind==='error'?'⚠️ ':notice.kind==='ok'?'✅ ':'ℹ️ '}{notice.text}
+      {notice.action&&(
+        <div style={{marginTop:8}}>
+          <button type="button" onClick={notice.action.fn} style={{background:C.dark,color:'#fff',border:'none',borderRadius:16,padding:'6px 14px',fontSize:12,fontWeight:'bold',cursor:'pointer'}}>{notice.action.label} →</button>
+        </div>
+      )}
+    </div>
+  ) : null;
+
   const OtpRow = (
     <>
       <div style={fieldLabel}>{t('enterOtp')}</div>
       <div style={{display:'flex',gap:8,marginBottom:12}}>
-        <input value={form.otp} onChange={e=>set('otp',e.target.value)} placeholder={t('enterOtp')} style={{...pillIn,marginBottom:0,flex:1}}/>
-        <button type="button" onClick={sendOtp} disabled={otpCooldown>0||busy} style={otpBtn}>{otpCooldown>0?`${otpCooldown}s`:t('sendCode')}</button>
+        <input value={form.otp} onChange={e=>set('otp',e.target.value)} placeholder={t('enterOtp')} inputMode="numeric" autoComplete="one-time-code" maxLength={10} style={{...pillIn,marginBottom:0,flex:1,minWidth:0}}/>
+        <button type="button" onClick={sendOtp} disabled={otpCooldown>0||busy} style={otpBtn}>{otpCooldown>0?`${otpCooldown}s`:(otpSent?'Resend':t('sendCode'))}</button>
       </div>
     </>
   );
@@ -1328,8 +1474,9 @@ function AuthScreen({onLogin,t}) {
             <div style={{fontWeight:900,fontSize:30,color:C.dark,marginBottom:10}}>{t('login')}</div>
             <div onClick={()=>switchMode('register')} style={linkTxt}>{t('noAccountYet')}</div>
           </div>
-          <input value={form.email} onChange={e=>set('email',e.target.value)} placeholder={t('email')} style={pillIn}/>
-          <input value={form.password} onChange={e=>set('password',e.target.value)} placeholder={t('password')} type="password" style={pillIn}/>
+          <input value={form.email} onChange={e=>set('email',e.target.value)} placeholder={t('email')} type="email" autoComplete="email" autoCapitalize="none" style={pillIn}/>
+          <input value={form.password} onChange={e=>set('password',e.target.value)} placeholder={t('password')} type="password" autoComplete="current-password" onKeyDown={e=>e.key==='Enter'&&doLogin()} style={pillIn}/>
+          {NoticeBox}
           <button onClick={doLogin} disabled={busy} style={pillBtn}>{busy?'...':t('login')}</button>
           <div onClick={()=>switchMode('reset')} style={{...linkTxt,marginTop:18}}>{t('forgotPassword')}</div>
         </>
@@ -1341,14 +1488,15 @@ function AuthScreen({onLogin,t}) {
             <div style={{fontWeight:900,fontSize:26,color:C.dark,lineHeight:1.25}}>{t('createAccount')}</div>
           </div>
           <div style={fieldLabel}>{t('name')}</div>
-          <input value={form.name} onChange={e=>set('name',e.target.value)} placeholder={t('name')} style={pillIn}/>
+          <input value={form.name} onChange={e=>set('name',e.target.value)} placeholder={t('name')} autoComplete="name" style={pillIn}/>
           <div style={fieldLabel}>{t('email')}</div>
-          <input value={form.email} onChange={e=>set('email',e.target.value)} placeholder={t('email')} style={pillIn}/>
+          <input value={form.email} onChange={e=>set('email',e.target.value)} placeholder={t('email')} type="email" autoComplete="email" autoCapitalize="none" style={pillIn}/>
           <div style={fieldLabel}>{t('password')}</div>
-          <input value={form.password} onChange={e=>set('password',e.target.value)} placeholder={t('password')} type="password" style={pillIn}/>
+          <input value={form.password} onChange={e=>set('password',e.target.value)} placeholder={`${t('password')} (6+)`} type="password" autoComplete="new-password" style={pillIn}/>
           <div style={fieldLabel}>{t('confirmPassword')}</div>
-          <input value={form.confirm} onChange={e=>set('confirm',e.target.value)} placeholder={t('confirmPassword')} type="password" style={pillIn}/>
+          <input value={form.confirm} onChange={e=>set('confirm',e.target.value)} placeholder={t('confirmPassword')} type="password" autoComplete="new-password" style={pillIn}/>
           {OtpRow}
+          {NoticeBox}
           <button onClick={doRegister} disabled={busy} style={pillBtn}>{busy?'...':t('signUp')}</button>
           <div onClick={()=>switchMode('login')} style={{...linkTxt,marginTop:18}}>{t('alreadyHaveAccount')}</div>
         </>
@@ -1360,12 +1508,13 @@ function AuthScreen({onLogin,t}) {
             <div style={{fontWeight:900,fontSize:26,color:C.dark,lineHeight:1.25}}>{t('resetPassword')}</div>
           </div>
           <div style={fieldLabel}>{t('email')}</div>
-          <input value={form.email} onChange={e=>set('email',e.target.value)} placeholder={t('email')} style={pillIn}/>
+          <input value={form.email} onChange={e=>set('email',e.target.value)} placeholder={t('email')} type="email" autoComplete="email" autoCapitalize="none" style={pillIn}/>
           <div style={fieldLabel}>{t('newPassword')}</div>
-          <input value={form.newPassword} onChange={e=>set('newPassword',e.target.value)} placeholder={t('newPassword')} type="password" style={pillIn}/>
+          <input value={form.newPassword} onChange={e=>set('newPassword',e.target.value)} placeholder={`${t('newPassword')} (6+)`} type="password" autoComplete="new-password" style={pillIn}/>
           <div style={fieldLabel}>{t('confirmPassword')}</div>
-          <input value={form.newConfirm} onChange={e=>set('newConfirm',e.target.value)} placeholder={t('confirmPassword')} type="password" style={pillIn}/>
+          <input value={form.newConfirm} onChange={e=>set('newConfirm',e.target.value)} placeholder={t('confirmPassword')} type="password" autoComplete="new-password" style={pillIn}/>
           {OtpRow}
+          {NoticeBox}
           <button onClick={doReset} disabled={busy} style={pillBtn}>{busy?'...':t('verifyLogin')}</button>
           <div onClick={()=>switchMode('login')} style={{...linkTxt,marginTop:18}}>{t('login')}</div>
         </>
@@ -1516,13 +1665,13 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
         const { error } = await supabase.from('addresses')
           .update({ name: na.name, mobile: na.mob, province: na.province, city: na.city, detail: na.detail, address: composed })
           .eq('id', na.id);
-        if(error){ alert('Failed to update address: '+error.message); return; }
+        if(error){ alert('Failed to update address: '+friendlyNetError(error.message)); return; }
         setAddrs(p=>p.map(a=>a.id===na.id?{...na,addr:composed}:a));
       } else {
         const { data, error } = await supabase.from('addresses')
           .insert({ customer_id: auth.user.id, name: na.name, mobile: na.mob, province: na.province, city: na.city, detail: na.detail, address: composed })
           .select().single();
-        if(error){ alert('Failed to save address: '+error.message); return; }
+        if(error){ alert('Failed to save address: '+friendlyNetError(error.message)); return; }
         setAddrs(p=>[...p,{ id:data.id, name:data.name, mob:data.mobile, province:data.province, city:data.city, detail:data.detail, addr:data.address }]);
       }
       setNa({name:'',mob:'',province:'',city:'',detail:''});
@@ -1533,7 +1682,7 @@ function ProfileTab({addrs,setAddrs,orders,auth,setAuth,lang,setLang,t}) {
   async function deleteAddr(id){
     if(!window.confirm('Delete this address?')) return;
     const { error } = await supabase.from('addresses').delete().eq('id', id);
-    if(error){ alert('Failed to delete address: '+error.message); return; }
+    if(error){ alert('Failed to delete address: '+friendlyNetError(error.message)); return; }
     setAddrs(p=>p.filter(a=>a.id!==id));
   }
   // Load the customer's own points/tier/referral summary once they're signed in.
@@ -1825,7 +1974,7 @@ function Checkout({step,setStep,info,setInfo,addrs,setAddrs,auth,cart,rawTotal,d
       const { data, error } = await supabase.from('addresses')
         .insert({ customer_id: auth.user.id, name: na.name, mobile: na.mob, province: na.province, city: na.city, detail: na.detail, address: composed })
         .select().single();
-      if(error){ alert('Failed to save address: '+error.message); return; }
+      if(error){ alert('Failed to save address: '+friendlyNetError(error.message)); return; }
       const saved = { id:data.id, name:data.name, mob:data.mobile, addr:data.address, province:data.province, city:data.city, detail:data.detail };
       setAddrs(p=>[...p,saved]);
       selectAddr(saved);
@@ -1971,12 +2120,13 @@ function Checkout({step,setStep,info,setInfo,addrs,setAddrs,auth,cart,rawTotal,d
   );
 }
 
-function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrders,setCart,lang,setLang,auth,setAuth,customSlides,qrCodes,onOrdersChanged,reloadProducts}) {
+function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrders,setCart,lang,setLang,auth,setAuth,customSlides,qrCodes,onOrdersChanged,reloadProducts,pubStatus,onRetryPublic}) {
   const [tab,setTab] = useState('home');
   const [coStep,setCO] = useState(null);
   const [info,setInfo] = useState({name:'',mob:'',addr:''});
   const [addrs,setAddrs] = useState([]);
   const [placing,setPlacing] = useState(false);
+  const pendingOrderRef = useRef(null);   // {id, sig} of an order being submitted
   const [pendingCheckout,setPendingCheckout] = useState(false);
   const t = useT(lang);
   const cartN=cart.reduce((s,i)=>s+i.qty,0);
@@ -2033,8 +2183,20 @@ function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrder
       }
 
       // 2. One atomic call. If stock ran out, the database refuses and nothing is written.
-      const orderId = `ORD${Date.now().toString(36).toUpperCase()}`;
-      const { error } = await supabase.rpc('place_order', {
+      // The order id is reused if the customer taps Submit again after a network
+      // drop, so a retry can never create a second copy of the same order.
+      const cartSig = JSON.stringify(cart.map(i=>[i.id,i.qty]));
+      const isRetry = !!pendingOrderRef.current && pendingOrderRef.current.sig===cartSig;
+      if(!isRetry){
+        pendingOrderRef.current = { id:`ORD${Date.now().toString(36).toUpperCase()}`, sig:cartSig };
+      }
+      const orderId = pendingOrderRef.current.id;
+      let alreadyPlaced = false;
+      if(isRetry){
+        const { data: existing } = await supabase.from('orders').select('id').eq('id',orderId).maybeSingle();
+        alreadyPlaced = !!existing;
+      }
+      const { error } = alreadyPlaced ? { error:null } : await supabase.rpc('place_order', {
         p_order_id:   orderId,
         p_date:       bjDate(),
         p_time:       bjTime(),
@@ -2054,7 +2216,10 @@ function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrder
         p_proof_url:  proofUrl,
         p_method:     method || 'alipay',
       });
-      if(error) throw new Error(error.message);
+      // "Duplicate key" here means the first attempt DID go through and only the
+      // reply was lost on the way back — treat it as placed.
+      if(error && !/duplicate key|orders_pkey|already exists/i.test(error.message||'')) throw new Error(error.message);
+      pendingOrderRef.current = null;
 
       // 3. Success — clear the cart, refresh orders and the now-reduced stock.
       setCart([]);
@@ -2063,7 +2228,7 @@ function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrder
       setCO('done');
     } catch(err){
       console.error('placeOrder error:', err);
-      alert(err.message || 'Something went wrong placing your order. Please try again.');
+      alert(friendlyNetError(err.message) || 'Something went wrong placing your order. Please try again.');
       // Pull fresh stock so the cart reflects what's actually left.
       if(reloadProducts) await reloadProducts();
       setCO(null); setTab('cart');
@@ -2088,8 +2253,8 @@ function CustomerApp({prods,cats,catColors,cart,addToCart,rm,upd,orders,setOrder
         )}
       </div>
       <div style={{paddingBottom:(cartN>0&&tab!=='cart'&&tab!=='profile')?140:68}}>
-        {tab==='home'&&<HomeTab products={prods} categories={cats} addToCart={addToCart} setTab={setTab} t={t} customSlides={customSlides} catColors={catColors}/>}
-        {tab==='categories'&&<CatTab products={prods} categories={cats} addToCart={addToCart} t={t}/>}
+        {tab==='home'&&<HomeTab products={prods} categories={cats} addToCart={addToCart} setTab={setTab} t={t} customSlides={customSlides} catColors={catColors} pubStatus={pubStatus} onRetry={onRetryPublic}/>}
+        {tab==='categories'&&<CatTab products={prods} categories={cats} addToCart={addToCart} t={t} pubStatus={pubStatus} onRetry={onRetryPublic}/>}
         {tab==='cart'&&<CartTab cart={cart} prods={prods} rawTotal={rawTotal} discTotal={discTotal} hasDsc={hasDsc} totalGW={totalGW} courierFee={courierFee} grandTotal={grandTotal} upd={upd} rm={rm} setCO={setCO} t={t} auth={auth} onRequireLogin={requireLogin}/>}
         {tab==='profile'&&<ProfileTab addrs={addrs} setAddrs={setAddrs} orders={myOrders} auth={auth} setAuth={setAuth} lang={lang} setLang={setLang} t={t}/>}
       </div>
@@ -2125,8 +2290,10 @@ function AdminLogin({onLogin}){
   async function doLogin(){
     if(!email||!password){setError('Enter email and password');return;}
     setBusy(true);setError('');
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if(error){setBusy(false);setError(error.message);return;}
+    let data, error;
+    try{ ({ data, error } = await supabase.auth.signInWithPassword({ email: email.trim().toLowerCase(), password })); }
+    catch(e){ error = e; }
+    if(error){setBusy(false);setError(friendlyAuthError(error.message));return;}
     const profile = await fetchProfile(data.user.id);
     if(profile?.role!=='admin'){
       await supabase.auth.signOut();
@@ -2250,6 +2417,50 @@ export default function App() {
     if(error){ console.error('loadInventory error:', error.message); return; }
     setInv(data.map(fromDbInv));
   },[]);
+  // 'loading' → 'ok', or 'error' if the catalogue couldn't be fetched (shown as a
+  // "Couldn't load products — Try again" panel instead of an empty shop).
+  const [pubStatus,setPubStatus]=useState('loading');
+  const hasProdsRef=useRef(false);
+  useEffect(()=>{ hasProdsRef.current=prods.length>0; },[prods]);
+  // Loads products, categories and site settings. Retries by itself (2 s, then
+  // 4 s) because a mobile connection in China often drops the first attempt.
+  const loadPublicData = useCallback(async (attempt=1)=>{
+    if(attempt===1 && !hasProdsRef.current) setPubStatus('loading');
+    let prodRes, catRes, settingsRes;
+    try{
+      [prodRes, catRes, settingsRes] = await Promise.all([
+        supabase.from('products').select('*').order('id'),
+        supabase.from('categories').select('*').order('sort_order').order('name'),
+        supabase.from('site_settings').select('*').eq('id',true).single(),
+      ]);
+    }catch(e){
+      prodRes = catRes = settingsRes = { error:{ message:String(e&&e.message||e) } };
+    }
+    // Only cache when everything came back cleanly, so we never persist a half-load.
+    if(!prodRes.error && !catRes.error && !settingsRes.error){
+      writePublicCache(prodRes.data, catRes.data, settingsRes.data);
+    }
+    if(prodRes.error){
+      console.error('loadProducts error:', prodRes.error.message);
+      if(attempt<3){ setTimeout(()=>loadPublicData(attempt+1), attempt*2000); return; }
+      setPubStatus(hasProdsRef.current?'ok':'error');
+    } else {
+      setProds(prodRes.data.map(fromDbProduct));
+      setPubStatus('ok');
+    }
+    // Categories + their colours come from the database, so the admin's
+    // Category Manager edits actually stick.
+    if(catRes.data && catRes.data.length){
+      setCats(catRes.data.map(c=>c.name));
+      const colors={};
+      catRes.data.forEach(c=>{ colors[c.name]=c.color; });
+      setCatColors(colors);
+    } else if(catRes.error) console.error('loadCategories error:', catRes.error.message);
+    if(settingsRes.data){
+      setCustomSlides(settingsRes.data.custom_slides || []);
+      setQrCodes(settingsRes.data.qr_codes || {alipay:'',wechat:''});
+    } else if(settingsRes.error) console.error('loadSettings error:', settingsRes.error.message);
+  },[]);
   useEffect(()=>{
     // Grab ?ref=CODE before anything else touches the URL.
     captureRefFromUrl();
@@ -2257,7 +2468,7 @@ export default function App() {
     //    This is what removes the "waiting on a blank store" feeling on repeat visits.
     const cached = readPublicCache();
     if(cached){
-      if(cached.prods) setProds(cached.prods.map(fromDbProduct));
+      if(cached.prods && cached.prods.length){ setProds(cached.prods.map(fromDbProduct)); hasProdsRef.current=true; setPubStatus('ok'); }
       if(cached.cats && cached.cats.length){
         setCats(cached.cats.map(c=>c.name));
         const cc={}; cached.cats.forEach(c=>{ cc[c.name]=c.color; }); setCatColors(cc);
@@ -2268,33 +2479,14 @@ export default function App() {
       }
     }
     // 2. Always refresh from the database straight away and swap in the live data.
-    async function loadPublicData(){
-      const [prodRes, catRes, settingsRes] = await Promise.all([
-        supabase.from('products').select('*').order('id'),
-        supabase.from('categories').select('*').order('sort_order').order('name'),
-        supabase.from('site_settings').select('*').eq('id',true).single(),
-      ]);
-      // Only cache when everything came back cleanly, so we never persist a half-load.
-      if(!prodRes.error && !catRes.error && !settingsRes.error){
-        writePublicCache(prodRes.data, catRes.data, settingsRes.data);
-      }
-      if(prodRes.error) console.error('loadProducts error:', prodRes.error.message);
-      else setProds(prodRes.data.map(fromDbProduct));
-      // Categories + their colours now come from the database instead of being
-      // hardcoded here, so the admin's Category Manager edits actually stick.
-      if(catRes.data && catRes.data.length){
-        setCats(catRes.data.map(c=>c.name));
-        const colors={};
-        catRes.data.forEach(c=>{ colors[c.name]=c.color; });
-        setCatColors(colors);
-      } else if(catRes.error) console.error('loadCategories error:', catRes.error.message);
-      if(settingsRes.data){
-        setCustomSlides(settingsRes.data.custom_slides || []);
-        setQrCodes(settingsRes.data.qr_codes || {alipay:'',wechat:''});
-      } else if(settingsRes.error) console.error('loadSettings error:', settingsRes.error.message);
-    }
-    loadPublicData();
-  },[]);
+    loadPublicData(1);
+    // 3. Coming back to the app (e.g. after paying in Alipay/WeChat) refreshes
+    //    stock and prices if the last load failed or is more than a minute old.
+    let last=Date.now();
+    const onVis=()=>{ if(document.visibilityState==='visible' && Date.now()-last>60000){ last=Date.now(); loadPublicData(1); } };
+    document.addEventListener('visibilitychange',onVis);
+    return ()=>document.removeEventListener('visibilitychange',onVis);
+  },[loadPublicData]);
   // Orders are protected by RLS, so they can only be fetched once we have a session.
   // Re-runs on every login/logout. The DATABASE decides what comes back:
   // a customer sees only their own rows, an admin sees all of them.
@@ -2373,7 +2565,7 @@ export default function App() {
   return(
     <div style={{fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif',minHeight:'100vh'}}>
       {view==='customer'
-        ?<CustomerApp prods={prods} cats={cats} catColors={catColors} cart={cart} addToCart={addToCart} rm={rm} upd={upd} orders={orders} setOrders={setOrders} setCart={setCart} lang={lang} setLang={setLang} auth={auth} setAuth={setAuth} customSlides={customSlides} qrCodes={qrCodes} onOrdersChanged={loadOrders} reloadProducts={reloadProducts}/>
+        ?<CustomerApp prods={prods} cats={cats} catColors={catColors} cart={cart} addToCart={addToCart} rm={rm} upd={upd} orders={orders} setOrders={setOrders} setCart={setCart} lang={lang} setLang={setLang} auth={auth} setAuth={setAuth} customSlides={customSlides} qrCodes={qrCodes} onOrdersChanged={loadOrders} reloadProducts={reloadProducts} pubStatus={pubStatus} onRetryPublic={()=>loadPublicData(1)}/>
         :(auth.loggedIn && auth.user?.role==='admin'
             ?<React.Suspense fallback={<div style={{minHeight:'100vh',display:'flex',alignItems:'center',justifyContent:'center',color:G.mut}}>Loading admin</div>}><AdminApp prods={prods} setProds={setProds} cats={cats} setCats={setCats} catColors={catColors} setCatColors={setCatColors} inv={inv} setInv={setInv} delInv={delInv} setDelInv={setDelInv} orders={orders} setOrders={setOrders} sales={sales} setSales={setSales} pos={pos} setPOs={setPOs} customSlides={customSlides} setCustomSlides={setCustomSlides} goCustomer={goCustomer} qrCodes={qrCodes} setQrCodes={setQrCodes} reloadProducts={reloadProducts} reloadInventory={reloadInventory} reloadOrders={loadOrders} onLogout={async()=>{await supabase.auth.signOut();setAuth({loggedIn:false,user:null});}}/></React.Suspense>
             :<AdminLogin onLogin={(u)=>setAuth({loggedIn:true,user:u})}/>
